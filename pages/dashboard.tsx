@@ -1,0 +1,247 @@
+import { useEffect, useState } from "react";
+import { useRouter } from "next/router";
+import type { UserMetadata } from "@supabase/supabase-js";
+
+import CompetitorPriceChecker from "@/components/CompetitorPriceChecker";
+import ProductManager from "@/components/ProductManager";
+import { useAuth } from "@/contexts/AuthContext";
+import { formatAccessDate, isAccessExpired } from "@/lib/access";
+
+type DashboardMenuKey = "product-management" | "competitor-prices";
+
+type DashboardMenu = {
+  key: DashboardMenuKey;
+  label: string;
+  title: string;
+};
+
+const dashboardMenus: DashboardMenu[] = [
+  {
+    key: "product-management",
+    label: "상품관리",
+    title: "상품관리",
+  },
+  {
+    key: "competitor-prices",
+    label: "경쟁가격확인",
+    title: "경쟁가격확인",
+  },
+];
+
+export default function Dashboard() {
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [activeMenu, setActiveMenu] =
+    useState<DashboardMenuKey>("product-management");
+  const { authUser, loading, signOut, user } = useAuth();
+  const router = useRouter();
+  const displayName = getDisplayName(user?.username, authUser?.user_metadata);
+  const weekRange = getCurrentWeekRange();
+  const activeMenuItem = dashboardMenus.find((menu) => menu.key === activeMenu);
+  const approvalStatus = user?.approval_status ?? "pending";
+  const accessExpired = isAccessExpired(user?.access_expires_at);
+  const accessExpiresDate = formatAccessDate(user?.access_expires_at);
+
+  useEffect(() => {
+    if (!loading && !authUser) {
+      void router.replace("/login");
+    }
+  }, [authUser, loading, router]);
+
+  async function handleSignOut() {
+    setSigningOut(true);
+
+    try {
+      await signOut();
+      await router.replace("/");
+    } finally {
+      setSigningOut(false);
+    }
+  }
+
+  if (loading || !authUser) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#f7f5ef] text-[#151515]">
+        <p className="text-sm font-bold text-[#6c655b]">Loading...</p>
+      </main>
+    );
+  }
+
+  if (approvalStatus !== "approved") {
+    const isRejected = approvalStatus === "rejected";
+
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#f7f5ef] px-6 text-[#151515]">
+        <section className="w-full max-w-[460px] rounded-lg border border-black/10 bg-white px-7 py-8 text-center shadow-[0_24px_72px_rgba(61,48,35,0.14)]">
+          <p className="mb-2.5 text-xs font-extrabold tracking-[0.14em] text-[#6c655b]">
+            BUYMA
+          </p>
+          <h1 className="text-2xl font-extrabold leading-tight">
+            {isRejected ? "가입이 거절되었습니다." : "관리자 승인 대기 중입니다."}
+          </h1>
+          <p className="mt-3 text-sm font-semibold leading-6 text-[#6c655b]">
+            {isRejected
+              ? "관리자에게 문의한 뒤 다시 가입을 진행해주세요."
+              : "관리자가 이메일 가입 요청을 승인하면 사용할 수 있습니다."}
+          </p>
+          <button
+            type="button"
+            disabled={signingOut}
+            onClick={() => void handleSignOut()}
+            className="mt-6 inline-flex min-h-11 items-center justify-center rounded-lg border border-black/15 bg-white px-5 text-sm font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            로그아웃
+          </button>
+        </section>
+      </main>
+    );
+  }
+
+  if (accessExpired) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#f7f5ef] px-6 text-[#151515]">
+        <section className="w-full max-w-[460px] rounded-lg border border-black/10 bg-white px-7 py-8 text-center shadow-[0_24px_72px_rgba(61,48,35,0.14)]">
+          <p className="mb-2.5 text-xs font-extrabold tracking-[0.14em] text-[#6c655b]">
+            BUYMA
+          </p>
+          <h1 className="text-2xl font-extrabold leading-tight">
+            사용 기간이 만료되었습니다.
+          </h1>
+          <p className="mt-3 text-sm font-semibold leading-6 text-[#6c655b]">
+            이 계정의 기본 사용 기간은 가입일로부터 7일입니다.
+            {accessExpiresDate ? ` 만료일: ${accessExpiresDate}` : ""}
+          </p>
+          <button
+            type="button"
+            disabled={signingOut}
+            onClick={() => void handleSignOut()}
+            className="mt-6 inline-flex min-h-11 items-center justify-center rounded-lg border border-black/15 bg-white px-5 text-sm font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            로그아웃
+          </button>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="grid min-h-screen grid-cols-[170px_minmax(0,1fr)] bg-[#f7f5ef] text-[#151515] max-[760px]:grid-cols-1">
+      <aside className="min-h-screen border-r border-black/10 bg-white max-[760px]:min-h-0 max-[760px]:border-b max-[760px]:border-r-0">
+        <div className="flex h-[52px] items-center border-b border-black/10 px-5">
+          <p className="text-sm font-extrabold tracking-[0.14em] text-[#6c655b]">
+            BUYMA
+          </p>
+        </div>
+
+        <nav aria-label="Dashboard navigation" className="grid gap-2 px-4 py-6">
+          {dashboardMenus.map((menu) => (
+            <button
+              key={menu.key}
+              type="button"
+              onClick={() => setActiveMenu(menu.key)}
+              className={`flex min-h-11 w-full items-center rounded-lg px-4 text-left text-sm font-extrabold transition ${
+                activeMenu === menu.key
+                  ? "bg-[#151515] text-white"
+                  : "bg-white text-[#151515] hover:bg-black/[0.04]"
+              }`}
+            >
+              {menu.label}
+            </button>
+          ))}
+        </nav>
+      </aside>
+
+      <div className="flex min-w-0 flex-col">
+        <header className="relative flex h-[52px] w-full shrink-0 items-center border-b border-black/10 bg-white px-5">
+          <div className="relative ml-auto">
+            <button
+              type="button"
+              aria-expanded={accountMenuOpen}
+              aria-controls="account-menu"
+              onClick={() => setAccountMenuOpen((open) => !open)}
+              className="inline-flex h-10 items-center justify-center gap-1 rounded-lg bg-white px-2 text-sm font-extrabold text-[#2d73ff] transition hover:bg-[#f4f7ff]"
+            >
+              {displayName}
+              <span
+                aria-hidden="true"
+                className="mt-0.5 h-0 w-0 border-x-[4px] border-t-[5px] border-x-transparent border-t-current"
+              />
+            </button>
+
+            {accountMenuOpen && (
+              <div
+                id="account-menu"
+                className="absolute right-0 top-[41px] z-10 w-[294px] overflow-hidden rounded-lg border border-black/10 bg-white shadow-[0_16px_40px_rgba(61,48,35,0.14)]"
+              >
+                <div className="flex min-h-10 items-center justify-center border-b border-black/10 px-4 text-xs font-bold text-[#6c655b]">
+                  {accessExpiresDate ? `사용 만료일 ${accessExpiresDate}` : weekRange}
+                </div>
+                <button
+                  type="button"
+                  disabled={signingOut}
+                  onClick={() => void handleSignOut()}
+                  className="flex min-h-10 w-full items-center justify-center px-3 text-sm font-bold text-[#151515] transition hover:bg-[#fff2ef] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  로그아웃
+                </button>
+              </div>
+            )}
+          </div>
+        </header>
+
+        <section className="flex-1 px-8 py-8 max-[760px]:px-5">
+          <div className="mb-7">
+            <p className="text-xs font-extrabold tracking-[0.14em] text-[#6c655b]">
+              DASHBOARD
+            </p>
+            <h1 className="mt-2 text-3xl font-extrabold leading-tight">
+              {activeMenuItem?.title}
+            </h1>
+          </div>
+
+          {renderDashboardContent(activeMenu)}
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function renderDashboardContent(activeMenu: DashboardMenuKey) {
+  switch (activeMenu) {
+    case "product-management":
+      return <ProductManager />;
+    case "competitor-prices":
+      return <CompetitorPriceChecker />;
+    default:
+      return null;
+  }
+}
+
+function getDisplayName(
+  username: string | null | undefined,
+  metadata: UserMetadata | undefined,
+) {
+  const metadataName =
+    typeof metadata?.username === "string" ? metadata.username : null;
+
+  return username ?? metadataName ?? "계정";
+}
+
+function getCurrentWeekRange() {
+  const today = new Date();
+  const weekStart = new Date(today);
+  weekStart.setDate(today.getDate() - today.getDay());
+
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+
+  return `${formatDate(weekStart)} ~ ${formatDate(weekEnd)}`;
+}
+
+function formatDate(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
