@@ -1,4 +1,4 @@
-export type ProductSite = "musinsa.com" | "ssfshop.com" | "29cm.co.kr" | "unknown";
+export type ProductSite = "musinsa.com" | "youthisyours.net" | "ssfshop.com" | "29cm.co.kr" | "unknown";
 
 export type ProductDraft = {
   site: ProductSite;
@@ -134,6 +134,7 @@ export type BuymaSettings = {
   exchangeRate: number;
   defaultReferencePrice: number;
   productTitlePrefix: string;
+  productDescriptionPrefix: string;
   shippingMethods: BuymaShippingMethod[];
   shippingMethodsInitialized: boolean;
   shippingMethodsVersion: number;

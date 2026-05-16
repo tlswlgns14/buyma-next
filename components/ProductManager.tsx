@@ -119,6 +119,13 @@ function getShippingMethodOptions(settings: BuymaSettings) {
   return [...options.values()];
 }
 
+function getStatusTone(status: string) {
+  if (/완료|성공|반영|추가|삭제|저장/.test(status)) return "success";
+  if (/오류|실패|못했습니다|없습니다|입력하세요|먼저/.test(status)) return "warning";
+  if (/중|시작|준비/.test(status)) return "working";
+  return "default";
+}
+
 export default function ProductManager() {
   const [products, setProducts] = useState<ProductDraft[]>([]);
   const [csvProducts, setCsvProducts] = useState<Array<ProductDraft | null>>([]);
@@ -156,6 +163,7 @@ export default function ProductManager() {
     }),
     [editedCsvBundle],
   );
+  const statusTone = getStatusTone(status);
   const urlCount = getUrls(urlsInput).length;
   const pendingCollectionCount = products.length && !currentProductsCollected ? products.length : 0;
 
@@ -221,7 +229,7 @@ export default function ProductManager() {
           setStatus(`상품명 영어 변환 중 ${index + 1}/${urls.length}: ${url}`);
           const englishProduct = await ensureEnglishProductTitle(result.product, settings.productTitlePrefix);
           setStatus(`상세내용 정리 중 ${index + 1}/${urls.length}: ${url}`);
-          const describedProduct = await ensureJapaneseProductDescription(englishProduct);
+          const describedProduct = await ensureJapaneseProductDescription(englishProduct, settings.productDescriptionPrefix);
           collected.push({ ...describedProduct, skuNumber: describedProduct.skuNumber || skuNumber });
         } else {
           collected.push({ ...makeFailedProduct(url, result.error), skuNumber });
@@ -270,7 +278,14 @@ export default function ProductManager() {
         const product = products[index];
         const dirtyFields = manualProductFields[index] ?? {};
 
-        const refreshedProduct = await refreshProductForCollection(product, dirtyFields, index, products.length, setStatus);
+        const refreshedProduct = await refreshProductForCollection(
+          product,
+          dirtyFields,
+          index,
+          products.length,
+          setStatus,
+          settings.productDescriptionPrefix,
+        );
         const normalizedProduct = normalizeProduct(refreshedProduct, settings, index);
         refreshedProducts[index] = normalizedProduct;
         normalizedProducts.push(normalizedProduct);
@@ -465,7 +480,7 @@ export default function ProductManager() {
         </div>
 
         <div className={`buyma-tab-panel ${activeTab === "edit" ? "active" : ""}`}>
-          <p className="buyma-site-check">{status}</p>
+          <p className={`buyma-site-check ${statusTone}`}>{status}</p>
 
           <div className="buyma-panel-grid">
             <BasicInfoPanel
@@ -1837,6 +1852,7 @@ function SettingsPanel({
         <div className="buyma-panel-body">
           <div className="buyma-form-grid col2">
             <Field label="상품명 앞 문구"><input value={settings.productTitlePrefix} onChange={(event) => onChange({ productTitlePrefix: event.target.value })} placeholder="예: 韓国人気" /></Field>
+            <Field label="상세내용 앞 문구"><textarea rows={4} value={settings.productDescriptionPrefix} onChange={(event) => onChange({ productDescriptionPrefix: event.target.value })} placeholder="BUYMA 상세내용 상단에 넣을 문구" /></Field>
           </div>
         </div>
       </div>
@@ -2169,7 +2185,7 @@ function CsvTable({
   onCellChange?: (rowIndex: number, cellIndex: number, value: string) => void;
   renderRowAction?: (rowIndex: number) => ReactNode;
 }) {
-  const rows = csv.split(/\r?\n/).map(parseCsvLine).filter((row) => row.length > 1);
+  const rows = csvToRows(csv);
   const headers = rows[0] ?? [];
   const body = rows.slice(1, 30);
   const hasRowAction = Boolean(renderRowAction);
@@ -2494,18 +2510,18 @@ function formatCollectedTitleWithBrand(product: ProductDraft, title: string, pre
   return joinTitleParts(brand ? `【${brand}】` : "", titlePrefix, productName);
 }
 
-async function ensureJapaneseProductDescription(product: ProductDraft): Promise<ProductDraft> {
+async function ensureJapaneseProductDescription(product: ProductDraft, descriptionPrefix = ""): Promise<ProductDraft> {
   const staticDescription = getJapaneseBrandDescription(product);
-  if (staticDescription) return { ...product, description: staticDescription };
+  if (staticDescription) return { ...product, description: applyDescriptionPrefix(staticDescription, descriptionPrefix) };
 
-  const sourceDescription = cleanText(product.descriptionKo);
-  if (!sourceDescription) return { ...product, description: "" };
+  const sourceDescription = normalizeDescriptionLines(product.descriptionKo);
+  if (!sourceDescription) return { ...product, description: applyDescriptionPrefix("", descriptionPrefix) };
 
   try {
-    const translated = await translateText(sourceDescription, "ja");
-    return { ...product, description: translated };
+    const translated = await translateMultilineText(sourceDescription, "ja");
+    return { ...product, description: applyDescriptionPrefix(translated, descriptionPrefix) };
   } catch {
-    return { ...product, description: sourceDescription };
+    return { ...product, description: applyDescriptionPrefix(sourceDescription, descriptionPrefix) };
   }
 }
 
@@ -2543,7 +2559,7 @@ function getCurrentCsvRowIndexesAfterMerge(
 }
 
 function countCsvDataRows(csv: string) {
-  return Math.max(0, csv.split(/\r?\n/).map(parseCsvLine).filter((row) => row.length > 1).length - 1);
+  return Math.max(0, csvToRows(csv).length - 1);
 }
 
 function applyCsvEditsToBundle(
@@ -2560,6 +2576,7 @@ function applyCsvEdits(csv: string, edits: CsvCellEdits) {
   if (Object.keys(edits).length === 0) return csv;
 
   const rows = csvToRows(csv);
+  const descriptionColumnIndex = rows[0]?.indexOf("商品コメント") ?? -1;
   Object.entries(edits).forEach(([key, value]) => {
     const [rowIndex, cellIndex] = parseCsvEditKey(key);
     const targetRowIndex = rowIndex + 1;
@@ -2567,7 +2584,7 @@ function applyCsvEdits(csv: string, edits: CsvCellEdits) {
     rows[targetRowIndex][cellIndex] = value;
   });
 
-  return rowsToCsv(rows);
+  return rowsToCsv(rows, descriptionColumnIndex >= 0 ? new Set([descriptionColumnIndex]) : undefined);
 }
 
 function shiftCsvEditsAfterRowDelete(edits: CsvCellEdits, deletedRowIndex: number) {
@@ -2593,11 +2610,61 @@ function parseCsvEditKey(key: string) {
 }
 
 function csvToRows(csv: string) {
-  return csv.split(/\r?\n/).map(parseCsvLine).filter((row) => row.length > 1);
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let current = "";
+  let quoted = false;
+
+  const pushRow = () => {
+    row.push(current);
+    if (row.length > 1) rows.push(row);
+    row = [];
+    current = "";
+  };
+
+  for (let index = 0; index < csv.length; index += 1) {
+    const char = csv[index];
+    const next = csv[index + 1];
+
+    if (char === '"' && quoted && next === '"') {
+      current += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      row.push(current);
+      current = "";
+    } else if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && next === "\n") index += 1;
+      pushRow();
+    } else {
+      current += char;
+    }
+  }
+
+  if (current || row.length) pushRow();
+  return rows;
 }
 
-function rowsToCsv(rows: string[][]) {
-  return rows.map((row) => row.map(sanitizeForCsv).join(",")).join("\n");
+function rowsToCsv(rows: string[][], preserveNewlineColumns = new Set<number>()) {
+  return rows
+    .map((row) =>
+      row
+        .map((value, columnIndex) => sanitizeCsvCell(value, preserveNewlineColumns.has(columnIndex)))
+        .join(","),
+    )
+    .join("\n");
+}
+
+function sanitizeCsvCell(value: unknown, preserveNewlines = false) {
+  if (!preserveNewlines) return sanitizeForCsv(value);
+
+  const text = String(value ?? "").replace(/\r\n?/g, "\n");
+  if (text.trim() === "") return "";
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
 }
 
 function findProductMissingCategoryOrSeason(products: ProductDraft[]) {
@@ -2712,6 +2779,7 @@ async function refreshProductForCollection(
   index: number,
   total: number,
   setStatus: (status: string) => void,
+  productDescriptionPrefix: string,
 ) {
   const sourceUrl = cleanText(product.sourceUrl);
   if (!sourceUrl || product.site === "unknown") return product;
@@ -2728,7 +2796,7 @@ async function refreshProductForCollection(
     if (!response.ok || !result.ok) return product;
 
     const titledProduct = await ensureEnglishProductTitle(result.product);
-    const describedProduct = await ensureJapaneseProductDescription(titledProduct);
+    const describedProduct = await ensureJapaneseProductDescription(titledProduct, productDescriptionPrefix);
     return mergeRefetchedProduct(product, describedProduct, dirtyFields);
   } catch {
     return product;
@@ -2759,8 +2827,8 @@ function mergeRefetchedProduct(
 
   if (!dirtyFields.description) {
     merged.description =
-      cleanText(fresh.description) ||
-      cleanText(current.description) ||
+      normalizeDescriptionLines(fresh.description) ||
+      normalizeDescriptionLines(current.description) ||
       getJapaneseBrandDescription(merged) ||
       "";
   }
@@ -2807,8 +2875,30 @@ function normalizeProduct(product: ProductDraft, settings: BuymaSettings, index:
     colorSystemMap: Object.fromEntries(
       sizeTableData.map((row) => [row.color, row.colorSystemId || getColorSystemId(row.color)]),
     ),
-    description: getJapaneseBrandDescription(brandedProduct) || brandedProduct.description || "",
+    description: applyDescriptionPrefix(
+      getJapaneseBrandDescription(brandedProduct) || brandedProduct.description || "",
+      settings.productDescriptionPrefix,
+    ),
   };
+}
+
+function applyDescriptionPrefix(description: string, prefix = "") {
+  const cleanPrefix = String(prefix ?? "").trim();
+  const cleanDescription = String(description ?? "").trim();
+  if (!cleanPrefix) return cleanDescription;
+  if (!cleanDescription) return cleanPrefix;
+  if (cleanDescription.startsWith(cleanPrefix)) return cleanDescription;
+  return `${cleanPrefix}\n${cleanDescription}`;
+}
+
+function normalizeDescriptionLines(value: unknown) {
+  return String(value ?? "")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => cleanText(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function applyBuymaBrand(product: ProductDraft): ProductDraft {
@@ -3152,6 +3242,18 @@ async function translateText(text: string, target: "en" | "ja") {
   const translated = data[0]?.map((item) => item[0]).join("").trim();
   if (!translated) throw new Error("번역 결과가 없습니다.");
   return translated;
+}
+
+async function translateMultilineText(text: string, target: "en" | "ja") {
+  const lines = text.replace(/\r/g, "\n").split("\n");
+  const translatedLines = await Promise.all(
+    lines.map(async (line) => {
+      const trimmed = cleanText(line);
+      return trimmed ? translateText(trimmed, target) : "";
+    }),
+  );
+
+  return translatedLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 async function readFile(file: File) {

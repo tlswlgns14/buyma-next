@@ -1,5 +1,5 @@
 import { MEASUREMENT_HEADERS } from "./data";
-import { BUYMA_SIZES } from "./id-data";
+import { BUYMA_SIZES, BUYMA_SIZE_DETAILS } from "./id-data";
 import { findBuymaBrand } from "./brands";
 import { getJapaneseBrandDescription } from "./brand-descriptions";
 import type { BuymaSettings, ColorSizeRow, CsvBundle, ProductDraft, StockStatus } from "./types";
@@ -62,6 +62,8 @@ const ITEMS_HEADERS = [
   ]).flat(),
 ];
 
+const ITEM_DESCRIPTION_COLUMN_INDEX = ITEMS_HEADERS.indexOf("商品コメント");
+
 const COLOR_SIZE_MEASUREMENT_HEADERS = [
   "着丈",
   "肩幅",
@@ -108,6 +110,18 @@ const COLOR_SIZE_MEASUREMENT_HEADERS = [
   "直径",
 ];
 
+const MEASUREMENT_HEADERS_BY_CATEGORY = BUYMA_SIZE_DETAILS.reduce((map, detail) => {
+  const categoryId = cleanText(detail.categoryId);
+  const name = cleanText(detail.name);
+  if (!categoryId || !name) return map;
+  const headers = map.get(categoryId) ?? new Set<string>();
+  headers.add(name);
+  map.set(categoryId, headers);
+  return map;
+}, new Map<string, Set<string>>());
+
+const SKIRT_LENGTH_HEADERS = new Set(["スカート丈"]);
+
 const COLORSIZES_HEADERS = [
   "商品ID",
   "商品管理番号",
@@ -139,7 +153,7 @@ export function generateItemsCsv(products: ProductDraft[], settings: BuymaSettin
     const sku = resolveSku(product, index);
     const title = truncateBuymaTitle(normalizeBuymaTitle(product, settings.productTitlePrefix));
     const sellingPrice = resolveSellingPrice(product, settings);
-    const description = buildDescription(product, title);
+    const description = buildDescription(product, settings.productDescriptionPrefix);
     const imageSlots = getImageSlots(product, index);
     const brandInfo = findBuymaBrand(product.brand || product.brandDisplayName || title);
     const brandId = product.brandId ? product.brandId : brandInfo?.id || "0";
@@ -244,7 +258,7 @@ export function generateItemsCsv(products: ProductDraft[], settings: BuymaSettin
     ];
   });
 
-  return toCsv([ITEMS_HEADERS, ...rows]);
+  return toCsv([ITEMS_HEADERS, ...rows], new Set([ITEM_DESCRIPTION_COLUMN_INDEX]));
 }
 
 export function generateColorSizesCsv(products: ProductDraft[], settings: BuymaSettings) {
@@ -472,8 +486,20 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function buildDescription(product: ProductDraft, title: string) {
-  return (getJapaneseBrandDescription(product) || product.description || "").replace(/\r?\n/g, "<br>");
+function buildDescription(product: ProductDraft, descriptionPrefix = "") {
+  return applyDescriptionPrefix(
+    getJapaneseBrandDescription(product) || product.description || "",
+    descriptionPrefix,
+  );
+}
+
+function applyDescriptionPrefix(description: string, prefix = "") {
+  const cleanPrefix = String(prefix ?? "").trim();
+  const cleanDescription = String(description ?? "").trim();
+  if (!cleanPrefix) return cleanDescription;
+  if (!cleanDescription) return cleanPrefix;
+  if (cleanDescription.startsWith(cleanPrefix)) return cleanDescription;
+  return `${cleanPrefix}\n${cleanDescription}`;
 }
 
 function getColorSizeRows(
@@ -523,8 +549,25 @@ function getMeasurementValues(product: ProductDraft, size: string) {
   const measurements = product.sizeMeasurements ?? {};
   const exact = measurements[size.toUpperCase()] || measurements[size] || findMeasurementRow(measurements, size) || {};
   const normalized = normalizeMeasurementValues(exact);
+  const allowedHeaders = getAllowedMeasurementHeaders(product.category);
 
-  return COLOR_SIZE_MEASUREMENT_HEADERS.map((header) => normalized[header] || normalized[`${header} `] || "");
+  if (allowedHeaders) {
+    return COLOR_SIZE_MEASUREMENT_HEADERS.map((header) => {
+      if (!allowedHeaders.has(header)) return "";
+      return getNormalizedMeasurementValue(normalized, header);
+    });
+  }
+
+  return COLOR_SIZE_MEASUREMENT_HEADERS.map((header) => getNormalizedMeasurementValue(normalized, header));
+}
+
+function getAllowedMeasurementHeaders(categoryId: unknown) {
+  return MEASUREMENT_HEADERS_BY_CATEGORY.get(cleanText(categoryId));
+}
+
+function getNormalizedMeasurementValue(normalized: Record<string, string>, header: string) {
+  if (SKIRT_LENGTH_HEADERS.has(header)) return normalized[header] || normalized["着丈"] || "";
+  return normalized[header] || normalized[`${header} `] || "";
 }
 
 function findMeasurementRow(
@@ -641,12 +684,26 @@ function getPurchaseDeadline(baseDate?: string) {
   return date.toISOString().slice(0, 10);
 }
 
-function toCsv(rows: Array<Array<string | number>>) {
+function toCsv(rows: Array<Array<string | number>>, preserveNewlineColumns = new Set<number>()) {
   return rows
     .map((row) =>
       row
-        .map((value, columnIndex) => (columnIndex === 0 && cleanText(value) === "" ? "" : sanitizeForCsv(value)))
+        .map((value, columnIndex) => {
+          if (columnIndex === 0 && cleanText(value) === "") return "";
+          return sanitizeCsvValue(value, preserveNewlineColumns.has(columnIndex));
+        })
         .join(","),
     )
     .join("\r\n");
+}
+
+function sanitizeCsvValue(value: unknown, preserveNewlines = false) {
+  if (!preserveNewlines) return sanitizeForCsv(value);
+
+  const text = String(value ?? "").replace(/\r\n?/g, "\n");
+  if (text.trim() === "") return "";
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
 }

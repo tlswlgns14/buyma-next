@@ -1,8 +1,10 @@
 import { musinsaExtractor } from "./musinsa";
+import { youthisyoursExtractor } from "./youthisyours";
 import type { ProductExtractor } from "./types";
 
 const PRODUCT_EXTRACTORS: ProductExtractor[] = [
   musinsaExtractor,
+  youthisyoursExtractor,
 ];
 
 export function parseProductUrl(value: string) {

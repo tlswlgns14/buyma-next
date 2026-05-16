@@ -23,6 +23,8 @@
 # misc
 .DS_Store
 *.pem
+/buyma/
+/.history/
 
 # debug
 npm-debug.log*

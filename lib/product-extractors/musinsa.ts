@@ -471,7 +471,7 @@ function parseMusinsaActualSizeMeasurements(json: Record<string, unknown>) {
   const measurements: Record<string, Record<string, string>> = {};
 
   sizes.forEach((sizeRow) => {
-    const sizeName = cleanText(sizeRow.name || sizeRow.sizeName || sizeRow.size).toUpperCase();
+    const sizeName = normalizeMusinsaSizeName(sizeRow.name || sizeRow.sizeName || sizeRow.size);
     if (!sizeName) return;
 
     const row: Record<string, string> = {};
@@ -867,7 +867,13 @@ function normalizeMusinsaApparelSizeOptions(
   _categoryText: string,
   _buymaCategoryId: string,
 ) {
-  return { ...options, sizeMeasurements };
+  const normalizedSizeMeasurements = normalizeMusinsaMeasurementSizeKeys(sizeMeasurements);
+
+  if (shouldUseSingleFreeSize(normalizedSizeMeasurements, options.optionStockMap)) {
+    return { ...options, sizes: ["FREE"], sizeMeasurements: normalizedSizeMeasurements };
+  }
+
+  return { ...options, sizeMeasurements: normalizedSizeMeasurements };
 }
 
 function shouldNormalizeKoreanApparelSizeCodes(sizes: string[], categoryText: string, buymaCategoryId: string) {
@@ -921,11 +927,29 @@ function normalizeMusinsaMeasurementSizeKeys(sizeMeasurements: Record<string, Re
   const normalized: Record<string, Record<string, string>> = {};
 
   Object.entries(sizeMeasurements).forEach(([size, measurements]) => {
-    const nextSize = isKoreanApparelSizeCode(size) ? normalizeKoreanApparelSizeCode(size) : size;
-    normalized[nextSize] = measurements;
+    normalized[normalizeMusinsaSizeName(size)] = measurements;
   });
 
   return normalized;
+}
+
+function normalizeMusinsaSizeName(value: unknown) {
+  const size = cleanText(value).toUpperCase().replace(/\s+/g, " ");
+  if (/^(?:NONE|FREE SIZE|FREE-SIZE|ONE SIZE|ONESIZE)$/.test(size)) return "FREE";
+  return size;
+}
+
+function shouldUseSingleFreeSize(
+  sizeMeasurements: Record<string, Record<string, string>>,
+  optionStockMap: Record<string, StockStatus>,
+) {
+  const measurementSizes = Object.keys(sizeMeasurements);
+  if (measurementSizes.length !== 1 || measurementSizes[0] !== "FREE") return false;
+
+  return !Object.keys(optionStockMap).some((key) => {
+    const [, size] = key.split("|");
+    return Boolean(size);
+  });
 }
 
 function isMusinsaShoeCategory(categoryText: string, buymaCategoryId: string) {

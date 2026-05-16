@@ -11,6 +11,7 @@ export const DEFAULT_BUYMA_SETTINGS: BuymaSettings = {
   exchangeRate: 0.11,
   defaultReferencePrice: 0,
   productTitlePrefix: "",
+  productDescriptionPrefix: "",
   shippingMethods: DEFAULT_BUYMA_SHIPPING_METHODS,
   shippingMethodsInitialized: true,
   shippingMethodsVersion: BUYMA_SHIPPING_METHODS_VERSION,
