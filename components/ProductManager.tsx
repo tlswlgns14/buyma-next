@@ -22,6 +22,7 @@ import {
   saveStoredSettings,
 } from "@/lib/buyma/storage";
 import type {
+  BuymaDescriptionPlacement,
   BuymaSettings,
   BuymaShippingMethod,
   ColorSizeRow,
@@ -126,6 +127,16 @@ function getStatusTone(status: string) {
   return "default";
 }
 
+function getKrwPerJpyRate(exchangeRate: number) {
+  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) return 0;
+  return Math.round((1 / exchangeRate) * 100) / 100;
+}
+
+function getJpyPerKrwRate(krwPerJpyRate: number) {
+  if (!Number.isFinite(krwPerJpyRate) || krwPerJpyRate <= 0) return 0;
+  return Math.round((1 / krwPerJpyRate) * 1000000) / 1000000;
+}
+
 export default function ProductManager() {
   const [products, setProducts] = useState<ProductDraft[]>([]);
   const [csvProducts, setCsvProducts] = useState<Array<ProductDraft | null>>([]);
@@ -190,7 +201,7 @@ export default function ProductManager() {
           ...current,
           exchangeRate: data.rate,
         }));
-        setStatus(`오늘 환율 적용 완료: 1 KRW = ${data.rate} JPY (${data.date})`);
+        setStatus(`오늘 환율 적용 완료: 1 JPY = ${getKrwPerJpyRate(data.rate)} KRW (${data.date})`);
       } catch {
         if (!cancelled) setStatus("오늘 환율을 가져오지 못했습니다. 설정의 환율값을 사용합니다.");
       }
@@ -229,7 +240,11 @@ export default function ProductManager() {
           setStatus(`상품명 영어 변환 중 ${index + 1}/${urls.length}: ${url}`);
           const englishProduct = await ensureEnglishProductTitle(result.product, settings.productTitlePrefix);
           setStatus(`상세내용 정리 중 ${index + 1}/${urls.length}: ${url}`);
-          const describedProduct = await ensureJapaneseProductDescription(englishProduct, settings.productDescriptionPrefix);
+          const describedProduct = await ensureJapaneseProductDescription(
+            englishProduct,
+            settings.productDescriptionPrefix,
+            settings.productDescriptionPlacement,
+          );
           collected.push({ ...describedProduct, skuNumber: describedProduct.skuNumber || skuNumber });
         } else {
           collected.push({ ...makeFailedProduct(url, result.error), skuNumber });
@@ -285,6 +300,7 @@ export default function ProductManager() {
           products.length,
           setStatus,
           settings.productDescriptionPrefix,
+          settings.productDescriptionPlacement,
         );
         const normalizedProduct = normalizeProduct(refreshedProduct, settings, index);
         refreshedProducts[index] = normalizedProduct;
@@ -462,22 +478,24 @@ export default function ProductManager() {
           </div>
         </div>
 
-        <div className="buyma-panel buyma-url-search-panel">
-          <div className="buyma-panel-body compact">
-            <div className="buyma-bulk-bar">
-              <textarea
-                rows={2}
-                value={urlsInput}
-                onChange={(event) => setUrlsInput(event.target.value)}
-                placeholder={"상품 URL 입력\nhttps://www.musinsa.com/products/3927285"}
-              />
-              <span>{urlCount}개 URL</span>
-              <button className="buyma-btn buyma-btn-green" disabled={isScraping} onClick={() => void scrapeUrls()}>
-                {isScraping ? "수집 중..." : "검색"}
-              </button>
+        {activeTab === "edit" && (
+          <div className="buyma-panel buyma-url-search-panel">
+            <div className="buyma-panel-body compact">
+              <div className="buyma-bulk-bar">
+                <textarea
+                  rows={2}
+                  value={urlsInput}
+                  onChange={(event) => setUrlsInput(event.target.value)}
+                  placeholder={"상품 URL 입력\nhttps://www.musinsa.com/products/3927285"}
+                />
+                <span>{urlCount}개 URL</span>
+                <button className="buyma-btn buyma-btn-green" disabled={isScraping} onClick={() => void scrapeUrls()}>
+                  {isScraping ? "수집 중..." : "검색"}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         <div className={`buyma-tab-panel ${activeTab === "edit" ? "active" : ""}`}>
           <p className={`buyma-site-check ${statusTone}`}>{status}</p>
@@ -1842,7 +1860,7 @@ function SettingsPanel({
         <div className="buyma-panel-body">
           <div className="buyma-form-grid col2">
             <Field label="마진율 (%)"><input type="number" value={settings.marginRate} onChange={(event) => onChange({ marginRate: Number(event.target.value) || 0 })} /></Field>
-            <Field label="환율 (KRW→JPY)"><input type="number" step="0.01" value={settings.exchangeRate} onChange={(event) => onChange({ exchangeRate: Number(event.target.value) || 0 })} /></Field>
+            <Field label="환율 (1 JPY→KRW)"><input type="number" step="0.01" value={getKrwPerJpyRate(settings.exchangeRate)} onChange={(event) => onChange({ exchangeRate: getJpyPerKrwRate(Number(event.target.value) || 0) })} /></Field>
             <Field label="기본 참고가격"><input type="number" value={settings.defaultReferencePrice} onChange={(event) => onChange({ defaultReferencePrice: Number(event.target.value) || 0 })} /></Field>
           </div>
         </div>
@@ -1852,7 +1870,15 @@ function SettingsPanel({
         <div className="buyma-panel-body">
           <div className="buyma-form-grid col2">
             <Field label="상품명 앞 문구"><input value={settings.productTitlePrefix} onChange={(event) => onChange({ productTitlePrefix: event.target.value })} placeholder="예: 韓国人気" /></Field>
-            <Field label="상세내용 앞 문구"><textarea rows={4} value={settings.productDescriptionPrefix} onChange={(event) => onChange({ productDescriptionPrefix: event.target.value })} placeholder="BUYMA 상세내용 상단에 넣을 문구" /></Field>
+            <div className="buyma-description-setting-row">
+              <Field label="상세내용 추가 문구"><textarea rows={4} value={settings.productDescriptionPrefix} onChange={(event) => onChange({ productDescriptionPrefix: event.target.value })} placeholder="BUYMA 상세내용에 추가할 문구" /></Field>
+              <Field label="상세내용 문구 위치">
+                <select value={settings.productDescriptionPlacement} onChange={(event) => onChange({ productDescriptionPlacement: event.target.value as BuymaDescriptionPlacement })}>
+                  <option value="before">상세내용 위</option>
+                  <option value="after">상세내용 아래</option>
+                </select>
+              </Field>
+            </div>
           </div>
         </div>
       </div>
@@ -2285,10 +2311,20 @@ function buildColorSizeRows(product: ProductDraft | null): ColorSizeRow[] {
 function isUsableProductSize(product: ProductDraft | null, value: unknown) {
   const size = cleanText(value).toUpperCase();
   if (!size || /^(TRUE|FALSE|NULL|UNDEFINED)$/.test(size)) return false;
+  const isKnownProductSize = isKnownCollectedSize(product, size);
   const hasAlphaSize = product?.sizes.some((item) => /[A-Z]/i.test(cleanText(item))) ?? false;
-  if (/^\d{1,2}$/.test(size) && hasAlphaSize) return false;
-  if (/^\d{1,2}$/.test(size) && product?.category && !resolveBuymaSizeTypeId(product.category, size)) return false;
+  if (/^\d{1,2}$/.test(size) && hasAlphaSize && !isKnownProductSize) return false;
+  if (/^\d{1,2}$/.test(size) && product?.category && !resolveBuymaSizeTypeId(product.category, size) && !isKnownProductSize) return false;
   return true;
+}
+
+function isKnownCollectedSize(product: ProductDraft | null, size: string) {
+  if (!product) return false;
+  if (product.sizes.some((item) => cleanText(item).toUpperCase() === size)) return true;
+  if (Object.keys(product.sizeMeasurements ?? {}).some((item) => cleanText(item).toUpperCase() === size)) return true;
+  return [product.stockData, product.optionStockMap].some((stockMap) =>
+    Object.keys(stockMap ?? {}).some((key) => cleanText(key.split("|")[1] ?? "").toUpperCase() === size),
+  );
 }
 
 function getColorDetailRows(product: ProductDraft | null, rows: ColorSizeRow[]) {
@@ -2501,28 +2537,75 @@ function formatCollectedTitleWithBrand(product: ProductDraft, title: string, pre
   if (!sourceTitle) return sourceTitle;
 
   const brand = resolveProductTitleBrand(product, sourceTitle);
+  const colors = resolveProductTitleColors(product);
   const cleanedTitle = removeProductTitleNoise(sourceTitle);
   const productName =
-    stripTitlePrefix(stripBrandFromTitle(cleanedTitle, brand), titlePrefix) ||
+    stripTitlePrefix(stripTrailingColor(stripBrandFromTitle(cleanedTitle, brand), colors), titlePrefix) ||
     stripTitlePrefix(cleanedTitle, titlePrefix) ||
     "Fashion Item";
+  const colorSuffix = colors.length > 1 ? `(${colors.length}colors)` : colors[0] ? `(${colors[0]})` : "";
 
-  return joinTitleParts(brand ? `【${brand}】` : "", titlePrefix, productName);
+  return joinTitleParts(brand ? `【${brand}】` : "", titlePrefix, productName, colorSuffix);
 }
 
-async function ensureJapaneseProductDescription(product: ProductDraft, descriptionPrefix = ""): Promise<ProductDraft> {
+async function ensureJapaneseProductDescription(
+  product: ProductDraft,
+  descriptionPrefix = "",
+  placement: BuymaDescriptionPlacement = "before",
+): Promise<ProductDraft> {
   const staticDescription = getJapaneseBrandDescription(product);
-  if (staticDescription) return { ...product, description: applyDescriptionPrefix(staticDescription, descriptionPrefix) };
-
   const sourceDescription = normalizeDescriptionLines(product.descriptionKo);
-  if (!sourceDescription) return { ...product, description: applyDescriptionPrefix("", descriptionPrefix) };
+
+  if (staticDescription) {
+    const extraSourceDescription = extractAdditionalDescriptionBlock(sourceDescription);
+    if (!extraSourceDescription) {
+      return { ...product, description: applyDescriptionPrefix(staticDescription, descriptionPrefix, placement) };
+    }
+
+    try {
+      const translatedExtra = await translateMultilineText(extraSourceDescription, "ja");
+      return {
+        ...product,
+        description: applyDescriptionPrefix(
+          joinDescriptionBlocks(staticDescription, translatedExtra),
+          descriptionPrefix,
+          placement,
+        ),
+      };
+    } catch {
+      return {
+        ...product,
+        description: applyDescriptionPrefix(
+          joinDescriptionBlocks(staticDescription, extraSourceDescription),
+          descriptionPrefix,
+          placement,
+        ),
+      };
+    }
+  }
+
+  if (!sourceDescription) return { ...product, description: applyDescriptionPrefix("", descriptionPrefix, placement) };
 
   try {
     const translated = await translateMultilineText(sourceDescription, "ja");
-    return { ...product, description: applyDescriptionPrefix(translated, descriptionPrefix) };
+    return { ...product, description: applyDescriptionPrefix(translated, descriptionPrefix, placement) };
   } catch {
-    return { ...product, description: applyDescriptionPrefix(sourceDescription, descriptionPrefix) };
+    return { ...product, description: applyDescriptionPrefix(sourceDescription, descriptionPrefix, placement) };
   }
+}
+
+function extractAdditionalDescriptionBlock(description: string) {
+  const marker = "사이즈 상세";
+  const index = description.indexOf(marker);
+  if (index < 0) return "";
+  return description.slice(index).trim();
+}
+
+function joinDescriptionBlocks(...blocks: string[]) {
+  return blocks
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function getCollectedCsvProducts(products: Array<ProductDraft | null>) {
@@ -2780,6 +2863,7 @@ async function refreshProductForCollection(
   total: number,
   setStatus: (status: string) => void,
   productDescriptionPrefix: string,
+  productDescriptionPlacement: BuymaDescriptionPlacement,
 ) {
   const sourceUrl = cleanText(product.sourceUrl);
   if (!sourceUrl || product.site === "unknown") return product;
@@ -2796,7 +2880,11 @@ async function refreshProductForCollection(
     if (!response.ok || !result.ok) return product;
 
     const titledProduct = await ensureEnglishProductTitle(result.product);
-    const describedProduct = await ensureJapaneseProductDescription(titledProduct, productDescriptionPrefix);
+    const describedProduct = await ensureJapaneseProductDescription(
+      titledProduct,
+      productDescriptionPrefix,
+      productDescriptionPlacement,
+    );
     return mergeRefetchedProduct(product, describedProduct, dirtyFields);
   } catch {
     return product;
@@ -2876,19 +2964,35 @@ function normalizeProduct(product: ProductDraft, settings: BuymaSettings, index:
       sizeTableData.map((row) => [row.color, row.colorSystemId || getColorSystemId(row.color)]),
     ),
     description: applyDescriptionPrefix(
-      getJapaneseBrandDescription(brandedProduct) || brandedProduct.description || "",
+      brandedProduct.description || getJapaneseBrandDescription(brandedProduct) || "",
       settings.productDescriptionPrefix,
+      settings.productDescriptionPlacement,
     ),
   };
 }
 
-function applyDescriptionPrefix(description: string, prefix = "") {
+function applyDescriptionPrefix(
+  description: string,
+  prefix = "",
+  placement: BuymaDescriptionPlacement = "before",
+) {
   const cleanPrefix = String(prefix ?? "").trim();
   const cleanDescription = String(description ?? "").trim();
   if (!cleanPrefix) return cleanDescription;
   if (!cleanDescription) return cleanPrefix;
-  if (cleanDescription.startsWith(cleanPrefix)) return cleanDescription;
-  return `${cleanPrefix}\n${cleanDescription}`;
+  const descriptionWithoutPrefix = removeDescriptionAffix(cleanDescription, cleanPrefix);
+  if (!descriptionWithoutPrefix) return cleanPrefix;
+  if (placement === "after") {
+    return `${descriptionWithoutPrefix}\n${cleanPrefix}`;
+  }
+  return `${cleanPrefix}\n${descriptionWithoutPrefix}`;
+}
+
+function removeDescriptionAffix(description: string, affix: string) {
+  if (description === affix) return "";
+  if (description.startsWith(`${affix}\n`)) return description.slice(affix.length).trim();
+  if (description.endsWith(`\n${affix}`)) return description.slice(0, -affix.length).trim();
+  return description;
 }
 
 function normalizeDescriptionLines(value: unknown) {

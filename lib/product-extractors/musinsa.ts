@@ -14,6 +14,7 @@ type MusinsaInventoryTarget = {
 };
 
 type MusinsaSizeMeasurements = Record<string, Record<string, string>>;
+type MusinsaRawSizeMeasurements = Record<string, Array<{ label: string; value: string }>>;
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36";
@@ -285,9 +286,11 @@ async function extractMusinsaProduct(url: URL): Promise<ProductDraft> {
     extractModelNumberFromHtml(html, productId) ||
     cleanModelNumber(extractModelNumber(productTitle || titleKo), productId);
   const apiOptions = productId ? await getMusinsaOptions(productId, url.toString()) : { colors: [], sizes: [], optionStockMap: {} };
-  const apiSizeMeasurements = productId ? await getMusinsaActualSizeMeasurements(productId, url.toString()) : {};
-  const rawSizeMeasurements = hasMusinsaSizeMeasurements(apiSizeMeasurements)
-    ? apiSizeMeasurements
+  const apiActualSizeData = productId
+    ? await getMusinsaActualSizeData(productId, url.toString())
+    : { measurements: {}, rawMeasurements: {} };
+  const rawSizeMeasurements = hasMusinsaSizeMeasurements(apiActualSizeData.measurements)
+    ? apiActualSizeData.measurements
     : await resolveMusinsaFallbackSizeMeasurements(productId, modelNumber, productData, apiProductData, url, apiOptions.sizes);
   const musinsaCategoryText = cleanText([
     jsonLd?.category,
@@ -311,6 +314,9 @@ async function extractMusinsaProduct(url: URL): Promise<ProductDraft> {
   const season = resolveMusinsaSeason(productData, apiProductData, html, [titleKo, titleEn, productTitle]);
   const stockStatus = resolveProductStockStatus(productData, apiProductData, normalizedSizeOptions.optionStockMap);
   const brandDescriptionKo = resolveMusinsaBrandDescription(productData, apiProductData);
+  const sizeDescriptionKo = buildMusinsaRawSizeDescription(apiActualSizeData.rawMeasurements) ||
+    buildMusinsaSizeDescription(sizeMeasurements);
+  const descriptionKo = joinMusinsaDescriptionBlocks(brandDescriptionKo, sizeDescriptionKo);
   const brandLogo = resolveMusinsaBrandLogo(productData, apiProductData, html, url);
 
   if (!titleKo && images.length === 0) {
@@ -335,7 +341,7 @@ async function extractMusinsaProduct(url: URL): Promise<ProductDraft> {
     brandLogo,
     productCode: productId || cleanText(productData?.goodsNo || productData?.productId),
     modelNumber,
-    descriptionKo: brandDescriptionKo,
+    descriptionKo,
     description: "",
     stockStatus,
     optionStockMap: normalizedSizeOptions.optionStockMap,
@@ -446,7 +452,7 @@ async function getMusinsaProductApiData(productId: string, referer: string) {
   return null;
 }
 
-async function getMusinsaActualSizeMeasurements(productId: string, referer: string) {
+async function getMusinsaActualSizeData(productId: string, referer: string) {
   try {
     const response = await fetch(`https://goods-detail.musinsa.com/api2/goods/${productId}/actual-size`, {
       headers: {
@@ -456,45 +462,108 @@ async function getMusinsaActualSizeMeasurements(productId: string, referer: stri
         Accept: "application/json",
       },
     });
-    if (!response.ok) return {};
+    if (!response.ok) return { measurements: {}, rawMeasurements: {} };
 
     const json = (await response.json()) as Record<string, unknown>;
-    return parseMusinsaActualSizeMeasurements(json);
+    return parseMusinsaActualSizeData(json);
   } catch {
-    return {};
+    return { measurements: {}, rawMeasurements: {} };
   }
 }
 
-function parseMusinsaActualSizeMeasurements(json: Record<string, unknown>) {
+function parseMusinsaActualSizeData(json: Record<string, unknown>) {
   const data = asRecord(json.data);
   const sizes = Array.isArray(data?.sizes) ? data.sizes.map(asRecord).filter(isRecord) : [];
   const measurements: Record<string, Record<string, string>> = {};
+  const rawMeasurements: MusinsaRawSizeMeasurements = {};
 
   sizes.forEach((sizeRow) => {
     const sizeName = normalizeMusinsaSizeName(sizeRow.name || sizeRow.sizeName || sizeRow.size);
     if (!sizeName) return;
 
     const row: Record<string, string> = {};
+    const rawRow: Array<{ label: string; value: string }> = [];
     const items = Array.isArray(sizeRow.items) ? sizeRow.items.map(asRecord).filter(isRecord) : [];
     items.forEach((item) => {
       const name = cleanText(item.name || item.itemName || item.label || item.title);
       const value = cleanText(item.value || item.sizeValue || item.actualValue);
+      addMusinsaRawMeasurementValue(rawRow, name, value);
       setMusinsaMeasurementValue(row, name, value);
     });
 
     Object.entries(sizeRow).forEach(([key, value]) => {
       if (["name", "sizeName", "size", "items"].includes(key)) return;
-      setMusinsaMeasurementValue(row, key, cleanText(value));
+      const textValue = cleanText(value);
+      addMusinsaRawMeasurementValue(rawRow, key, textValue);
+      setMusinsaMeasurementValue(row, key, textValue);
     });
 
     if (Object.keys(row).length) measurements[sizeName] = row;
+    if (rawRow.length) rawMeasurements[sizeName] = rawRow;
   });
 
-  return measurements;
+  return { measurements, rawMeasurements };
+}
+
+function addMusinsaRawMeasurementValue(
+  row: Array<{ label: string; value: string }>,
+  label: string,
+  value: string,
+) {
+  const cleanLabel = cleanText(label);
+  const cleanValue = cleanText(value);
+  if (!cleanLabel || isBlankMusinsaMeasurementValue(cleanValue)) return;
+  if (row.some((item) => item.label === cleanLabel)) return;
+  row.push({ label: cleanLabel, value: cleanValue });
 }
 
 function hasMusinsaSizeMeasurements(sizeMeasurements: MusinsaSizeMeasurements) {
   return Object.values(sizeMeasurements).some((row) => Object.keys(row).length > 0);
+}
+
+function buildMusinsaRawSizeDescription(rawMeasurements: MusinsaRawSizeMeasurements) {
+  const rows = Object.entries(rawMeasurements).filter(([, measurements]) => measurements.length > 0);
+  if (!rows.length) return "";
+
+  const lines = ["사이즈 상세"];
+  rows.forEach(([size, measurements]) => {
+    lines.push(`${size} SIZE`);
+    measurements.forEach(({ label, value }) => {
+      if (!cleanText(value)) return;
+      lines.push(`${label} ${formatMeasurementWithUnit(value)}`);
+    });
+  });
+
+  return lines.join("\n");
+}
+
+function buildMusinsaSizeDescription(sizeMeasurements: MusinsaSizeMeasurements) {
+  const rows = Object.entries(sizeMeasurements).filter(([, measurements]) => Object.keys(measurements).length > 0);
+  if (!rows.length) return "";
+
+  const lines = ["사이즈 상세"];
+  rows.forEach(([size, measurements]) => {
+    lines.push(`${size} SIZE`);
+    Object.entries(measurements).forEach(([label, value]) => {
+      if (!cleanText(value)) return;
+      lines.push(`${label} ${formatMeasurementWithUnit(value)}`);
+    });
+  });
+
+  return lines.join("\n");
+}
+
+function formatMeasurementWithUnit(value: unknown) {
+  const text = cleanText(value);
+  if (!text || /cm$/i.test(text)) return text;
+  return `${text}cm`;
+}
+
+function joinMusinsaDescriptionBlocks(...blocks: string[]) {
+  return blocks
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 async function resolveMusinsaFallbackSizeMeasurements(

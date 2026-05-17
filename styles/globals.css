@@ -436,6 +436,13 @@ a {
   grid-template-columns: 1fr 1fr 1fr;
 }
 
+.buyma-description-setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 12px;
+  align-items: start;
+}
+
 .buyma-inline-bottom {
   align-self: end;
   min-height: 32px;

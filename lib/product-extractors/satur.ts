@@ -5,57 +5,60 @@ import type { ProductExtractor } from "./types";
 
 type JsonLdProduct = Record<string, unknown>;
 type Cafe24OptionStock = Record<string, unknown>;
+type SizeGuideData = {
+  measurements: Record<string, Record<string, string>>;
+  description: string;
+};
+type SaturMeasurementContext = "top" | "bottom" | "skirt" | "onepiece" | "unknown";
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36";
 
-export const youthisyoursExtractor: ProductExtractor = {
-  site: "youthisyours.net",
-  supports: (url) => url.hostname === "youthisyours.net" || url.hostname.endsWith(".youthisyours.net"),
-  extract: extractYouthisyoursProduct,
+export const saturExtractor: ProductExtractor = {
+  site: "satur.co.kr",
+  supports: (url) => url.hostname === "satur.co.kr" || url.hostname === "www.satur.co.kr",
+  extract: extractSaturProduct,
 };
 
-async function extractYouthisyoursProduct(url: URL): Promise<ProductDraft> {
+async function extractSaturProduct(url: URL): Promise<ProductDraft> {
   const html = await fetchHtml(url.toString());
   const jsonLd = extractJsonLdProduct(html);
   const optionStock = extractOptionStockData(html);
   const productNo = extractProductNo(url, html);
-
   const title =
     cleanText(jsonLd?.name) ||
     extractCafe24Variable(html, "product_name") ||
-    cleanPageTitle(extractMeta(html, "og:title") || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]);
-  const brandSource = cleanText(asRecord(jsonLd?.brand)?.name) || "Youth is Yours";
-  const buymaBrand = findBuymaBrand(brandSource) || findBuymaBrand("Youth is Yours");
-  const brand = buymaBrand?.name || normalizeBrandName(brandSource);
-  const rawDescriptionKo = normalizeTextBlock(
-    stringValue(jsonLd?.description) || extractMeta(html, "description") || extractMeta(html, "og:description"),
-  );
-  const descriptionKo = normalizeYouthisyoursDescriptionMeasurements(rawDescriptionKo);
+    cleanPageTitle(extractMeta(html, "description") || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]);
+  const buymaBrand = findBuymaBrand("SATUR");
   const price = parsePrice(firstOfferValue(jsonLd, "price") || extractCafe24Variable(html, "product_price"));
-  const colors = resolveColors(rawDescriptionKo, title);
-  const sizeMeasurements = parseSizeMeasurements(rawDescriptionKo);
+  const colors = resolveColors(title);
   const optionSizes = extractSizesFromOptionStock(optionStock);
   const offerSizes = extractSizesFromOffers(jsonLd, title);
-  const sizes = unique([...optionSizes, ...offerSizes, ...Object.keys(sizeMeasurements)]);
+  const sizeGuide = parseSizeGuide(extractSaturTabBlock(html, 1), title);
+  const sizes = unique([...optionSizes, ...offerSizes, ...Object.keys(sizeGuide.measurements)]);
   const optionStockMap = buildOptionStockMap(optionStock, colors);
   const stockStatus = resolveOverallStockStatus(optionStockMap);
   const images = extractProductImages(html, jsonLd, url);
   const brandLogo = extractBrandLogo(html, url);
+  const descriptionKo = joinDescriptionBlocks(
+    normalizeTextBlock(jsonLd?.description),
+    extractFabricLine(extractSaturTabBlock(html, 2)),
+    sizeGuide.description,
+  );
 
   if (!title && images.length === 0) {
-    throw new Error("Youthisyours product information could not be found. Please check the URL.");
+    throw new Error("SATUR 상품 정보를 찾지 못했습니다. URL을 확인해주세요.");
   }
 
   return {
-    site: "youthisyours.net",
+    site: "satur.co.kr",
     sourceUrl: url.toString(),
     titleKo: title,
     title,
     titleEn: title,
-    brand,
-    brandDisplayName: buymaBrand?.displayName,
-    brandId: buymaBrand?.id || "0",
+    brand: buymaBrand?.name || "SATUR",
+    brandDisplayName: buymaBrand?.displayName || "SATUR(セター)",
+    brandId: buymaBrand?.id || "17507",
     price,
     colors,
     sizes,
@@ -66,7 +69,7 @@ async function extractYouthisyoursProduct(url: URL): Promise<ProductDraft> {
     description: "",
     stockStatus,
     optionStockMap,
-    ...(Object.keys(sizeMeasurements).length ? { sizeMeasurements } : {}),
+    ...(Object.keys(sizeGuide.measurements).length ? { sizeMeasurements: sizeGuide.measurements } : {}),
     extractedAt: new Date().toISOString(),
   };
 }
@@ -79,7 +82,7 @@ async function fetchHtml(url: string) {
     },
   });
   if (!response.ok) {
-    throw new Error(`Youthisyours page request failed (${response.status}).`);
+    throw new Error(`SATUR 페이지 요청에 실패했습니다. (${response.status})`);
   }
   return response.text();
 }
@@ -93,7 +96,7 @@ function extractJsonLdProduct(html: string): JsonLdProduct | null {
       const product = findJsonLdProduct(parsed);
       if (product) return product;
     } catch {
-      // Ignore malformed analytics JSON-LD blocks.
+      // Ignore malformed JSON-LD blocks.
     }
   }
 
@@ -167,19 +170,18 @@ function extractProductNo(url: URL, html: string) {
   return (
     cleanText(url.searchParams.get("product_no")) ||
     extractCafe24Variable(html, "iProductNo") ||
+    cleanText(url.pathname.match(/\/(\d+)(?:\/|$)/)?.[1]) ||
     cleanText(html.match(/content_ids:\s*\[['"](\d+)['"]\]/i)?.[1])
   );
 }
 
-function resolveColors(description: string, title: string) {
-  const colorLine = description.match(/(?:^|\n)\s*COLOR\s*\|\s*([^\n]+)/i)?.[1] || "";
-  const titleColor = title.match(/\(([^()]+)\)\s*$/)?.[1] || "";
-  const source = colorLine || titleColor;
-
+function resolveColors(title: string) {
+  const suffixColor = title.match(/\s-\s([^-/]+)$/)?.[1] || "";
+  const bracketColor = title.match(/\(([^()]+)\)\s*$/)?.[1] || "";
   return unique(
-    source
+    (suffixColor || bracketColor)
       .split(/[,/|]/)
-      .map((color) => cleanText(color.replace(/\bCOLOR\b/gi, "")))
+      .map((color) => cleanText(color))
       .map(convertColorToEnglish)
       .filter(isUsefulColor),
   );
@@ -248,85 +250,126 @@ function resolveOverallStockStatus(optionStockMap: Record<string, StockStatus>):
   return values.some((stock) => stock === "1") ? "1" : "0";
 }
 
-function parseSizeMeasurements(description: string) {
+function extractSaturTabBlock(html: string, index: number) {
+  return Array.from(html.matchAll(/<ol\b[^>]*class=["'][^"']*\btab_info\b[^"']*["'][^>]*>([\s\S]*?)<\/ol>/gi))
+    .map((match) => match[1])[index] || "";
+}
+
+function parseSizeGuide(sizeGuideHtml: string, title: string): SizeGuideData {
   const measurements: Record<string, Record<string, string>> = {};
-  let currentSize = "";
+  const descriptionLines: string[] = [];
+  const text = normalizeTextBlock(sizeGuideHtml);
 
-  description.split(/\n+/).forEach((line) => {
-    const text = cleanText(line);
-    if (!text) return;
+  text.split("\n").forEach((line) => {
+    const match = line.match(/^([A-Z0-9]+)\s*-\s*(.+)$/i);
+    if (!match) return;
 
-    const size = text.match(/^([A-Z0-9][A-Z0-9./+-]{0,12})\s+SIZE$/i)?.[1];
-    if (size && isLikelySizeName(size)) {
-      currentSize = cleanSizeName(size);
-      measurements[currentSize] = measurements[currentSize] || {};
-      return;
-    }
+    const size = cleanSizeName(match[1]);
+    if (!isLikelySizeName(size)) return;
 
-    if (!currentSize) return;
+    const row: Record<string, string> = {};
+    const rawDescriptionParts = match[2].split("/").map(cleanText).filter(Boolean);
+    const context = resolveMeasurementContext(`${title} ${match[2]}`);
+    match[2].split("/").forEach((part) => {
+      const measurement = parseMeasurementPart(part, context);
+      if (!measurement) return;
+      row[measurement.key] = measurement.value;
+    });
 
-    const measurement = text.match(/^([A-Z][A-Z\s./-]*?)\s+([0-9]+(?:\.[0-9]+)?)\s*(?:CM)?$/i);
-    if (!measurement) return;
-
-    const mapping = normalizeMeasurementKey(measurement[1]);
-    if (mapping) measurements[currentSize][mapping.key] = formatMeasurementValue(measurement[2], mapping.multiplier);
+    if (Object.keys(row).length) measurements[size] = row;
+    if (rawDescriptionParts.length) descriptionLines.push(`${size} - ${rawDescriptionParts.join(" / ")}`);
   });
 
-  return Object.fromEntries(Object.entries(measurements).filter(([, values]) => Object.keys(values).length));
+  return {
+    measurements,
+    description: descriptionLines.length ? ["사이즈 상세", ...descriptionLines].join("\n") : "",
+  };
 }
 
-function normalizeYouthisyoursDescriptionMeasurements(description: string) {
-  return description
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .map((line) =>
-      line.replace(/^(\s*)(CHEST|BUST)(\s+)([0-9]+(?:\.[0-9]+)?)(\s*CM?)?\s*$/i, (
-        _match: string,
-        indent: string,
-        label: string,
-        space: string,
-        value: string,
-        unit: string,
-      ) => `${indent}${label.toUpperCase()}${space}${formatMeasurementValue(value, 2)}${unit || "cm"}`),
-    )
-    .join("\n")
-    .trim();
+function resolveMeasurementContext(value: string): SaturMeasurementContext {
+  const text = cleanText(value);
+  if (/스커트|치마|skirt/i.test(text)) return "skirt";
+  if (/원피스|드레스|one\s*piece|dress/i.test(text)) return "onepiece";
+  if (/어깨|가슴|소매|암홀/.test(text)) return "top";
+  if (/허리|엉덩이|힙|밑위|밑아래|인심|허벅지/.test(text)) return "bottom";
+  return "unknown";
 }
 
-function normalizeMeasurementKey(value: string): { key: string; multiplier?: number } | null {
-  const key = cleanText(value).replace(/\s+/g, " ").toUpperCase();
-  if (key === "WAIST" || key === "WAIST WIDTH") return { key: "waist" };
-  if (key === "HIP" || key === "HIPS") return { key: "hips" };
-  if (key === "SHOULDER" || key === "SHOULDER WIDTH") return { key: "shoulder" };
-  if (key === "CHEST" || key === "BUST") return { key: "chest", multiplier: 2 };
-  if (key === "SLEEVE" || key === "SLEEVE LENGTH") return { key: "sleevelength" };
-  if (key === "HEM" || key === "HEM WIDE" || key === "HEM WIDTH" || key === "BOTTOM WIDTH") return { key: "hemwidth" };
-  if (key === "RISE" || key === "RISE LENGTH" || key === "FRONT RISE" || key === "CROTCH") return { key: "rise" };
-  if (key === "THIGH" || key === "THIGH WIDTH" || key === "TIGHT") return { key: "thighwidth" };
-  if (key === "INSEAM") return { key: "inseam" };
-  if (key === "LENGTH" || key === "TOTAL LENGTH") return { key: "length" };
+function parseMeasurementPart(value: string, context: SaturMeasurementContext) {
+  const match = cleanText(value).match(/^(.+?)\s*(-?\d+(?:\.\d+)?)\s*(?:cm)?$/i);
+  if (!match) return null;
+
+  const mapping = resolveSaturMeasurementKey(match[1], context);
+  if (!mapping) return null;
+
+  return {
+    key: mapping.key,
+    label: mapping.label,
+    value: formatMeasurementValue(match[2], mapping.multiplier),
+  };
+}
+
+function resolveSaturMeasurementKey(
+  value: string,
+  context: SaturMeasurementContext,
+): { key: string; label: string; multiplier?: number } | null {
+  const label = cleanText(value).replace(/\s+/g, "");
+  if (["스커트장", "스커트길이", "스커트丈", "치마기장", "치마길이"].includes(label)) return { key: "スカート丈", label: "스커트丈" };
+  if (["총장", "총기장", "총길이", "기장"].includes(label) && context === "skirt") return { key: "スカート丈", label: "스커트丈" };
+  if (["총장", "총기장", "총길이", "기장"].includes(label) && context !== "bottom") return { key: "着丈", label: "총장" };
+  if (["너비", "가로", "폭가로"].includes(label)) return { key: "幅", label: "너비" };
+  if (["높이", "세로"].includes(label)) return { key: "高さ", label: "높이" };
+  if (["폭", "깊이", "마치"].includes(label)) return { key: "マチ", label: "폭" };
+  if (["핸들", "핸들높이", "손잡이", "손잡이높이"].includes(label)) return { key: "持ち手", label: "핸들 높이" };
+  if (["볼너비", "발볼", "발볼너비"].includes(label)) return { key: "足幅", label: "볼 너비" };
+  if (["굽높이", "굽", "힐높이"].includes(label)) return { key: "ヒール高", label: "굽 높이" };
+  if (["어깨", "어깨너비", "어깨넓이", "어깨단면"].includes(label)) return { key: "肩幅", label: "어깨" };
+  if (["가슴", "가슴단면", "가슴너비", "가슴폭", "품", "품단면"].includes(label)) {
+    return { key: "胸囲", label: "가슴둘레", multiplier: 2 };
+  }
+  if (["가슴둘레"].includes(label)) return { key: "胸囲", label: "가슴둘레" };
+  if (["소매", "소매장", "소매길이", "팔길이"].includes(label)) return { key: "袖丈", label: "소매장" };
+  if (["허리", "허리단면", "허리너비", "허리폭"].includes(label)) return { key: "ウエスト", label: "허리둘레" };
+  if (["허리둘레"].includes(label)) return { key: "ウエスト", label: "허리둘레" };
+  if (["엉덩이", "힙", "힙단면", "엉덩이단면", "엉덩이너비", "엉덩이폭"].includes(label)) return { key: "ヒップ", label: "엉덩이둘레" };
+  if (["엉덩이둘레", "힙둘레"].includes(label)) return { key: "ヒップ", label: "엉덩이둘레" };
+  if (["밑위", "앞밑위"].includes(label)) return { key: "股上", label: "밑위" };
+  if (["밑아래", "밑아래길이", "인심"].includes(label)) return { key: "股下", label: "밑아래" };
+  if (["허벅지", "허벅지단면", "허벅지너비", "허벅지폭"].includes(label)) return { key: "もも周り", label: "허벅지둘레" };
+  if (["허벅지둘레"].includes(label)) return { key: "もも周り", label: "허벅지둘레" };
+  if (["밑단", "밑단단면", "밑단너비", "밑단폭"].includes(label) && context !== "top") return { key: "すそ周り", label: "밑단둘레" };
+  if (["밑단둘레"].includes(label)) return { key: "すそ周り", label: "밑단둘레" };
   return null;
 }
 
 function formatMeasurementValue(value: string, multiplier = 1) {
-  const numeric = Number(value);
+  const numeric = Number(cleanText(value).replace(/cm$/i, ""));
   if (!Number.isFinite(numeric)) return value;
   const result = numeric * multiplier;
   return Number.isInteger(result) ? String(result) : String(Number(result.toFixed(1)));
 }
 
+function extractFabricLine(infoHtml: string) {
+  const text = normalizeTextBlock(infoHtml);
+  return text.split("\n").find((line) => /^Fabric\s*:/i.test(line)) || "";
+}
+
 function extractProductImages(html: string, jsonLd: JsonLdProduct | null, baseUrl: URL) {
-  const imageCandidates = [
+  const jsonImageCandidates = [
     ...asArray(jsonLd?.image),
     ...asArray(firstOfferValue(jsonLd, "image")),
+  ];
+  const htmlImageCandidates = [
     extractMeta(html, "og:image"),
     ...extractHtmlImageSources(html),
   ];
+  const imageCandidates = jsonImageCandidates.length ? jsonImageCandidates : htmlImageCandidates;
 
   return unique(
     imageCandidates
       .map((src) => resolveUrl(cleanText(src), baseUrl))
-      .filter(isProductImageUrl),
+      .filter(isProductImageUrl)
+      .map(preferLargeProductImage),
   ).slice(0, 20);
 }
 
@@ -334,7 +377,7 @@ function extractBrandLogo(html: string, baseUrl: URL) {
   const logo = extractHtmlImages(html).find((image) => {
     const alt = cleanText(image.alt).toLowerCase();
     const src = image.src.toLowerCase();
-    return alt.includes("logo") || alt.includes("로고") || src.includes("/category/editor/");
+    return alt.includes("logo") || alt.includes("로고") || src.includes("saturlogo");
   });
 
   return logo ? resolveUrl(logo.src, baseUrl) : "";
@@ -349,7 +392,7 @@ function extractHtmlImages(html: string) {
     .map((match) => {
       const attrs = match[1];
       return {
-        src: extractHtmlAttribute(attrs, "src"),
+        src: extractHtmlAttribute(attrs, "src") || extractHtmlAttribute(attrs, "ec-data-src"),
         alt: extractHtmlAttribute(attrs, "alt"),
       };
     })
@@ -367,14 +410,23 @@ function isProductImageUrl(value: string) {
   if (src.includes("img.echosting.cafe24.com")) return false;
   if (src.includes("btn_") || src.includes("basket") || src.includes("qrcode")) return false;
   if (src.includes("/category/editor/")) return false;
-  return src.includes("/web/product/") || src.includes("/web/upload/nneditor/");
+  return src.includes("/web/product/");
+}
+
+function preferLargeProductImage(value: string) {
+  return value
+    .replace("/web/product/small/", "/web/product/big/")
+    .replace("/web/product/extra/small/", "/web/product/extra/big/");
 }
 
 function resolveUrl(value: string, baseUrl: URL) {
   if (!value) return "";
-  if (value.startsWith("//")) return `${baseUrl.protocol}${value}`;
+  const cleanValue = value.replace(/\\\//g, "/").trim();
+  const embeddedAbsoluteUrl = cleanValue.match(/https?:\/\/.+$/i)?.[0];
+  if (embeddedAbsoluteUrl) return embeddedAbsoluteUrl;
+  if (cleanValue.startsWith("//")) return `${baseUrl.protocol}${cleanValue}`;
   try {
-    return new URL(value, baseUrl).toString();
+    return new URL(cleanValue, baseUrl).toString();
   } catch {
     return "";
   }
@@ -406,12 +458,14 @@ function extractMeta(html: string, property: string) {
   return "";
 }
 
-function normalizeTextBlock(value: string) {
-  return decodeHtmlEntities(value)
+function normalizeTextBlock(value: unknown) {
+  return decodeHtmlEntities(String(value ?? ""))
+    .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/p>/gi, "\n")
+    .replace(/<\/li>/gi, "\n")
     .replace(/<[^>]*>/g, " ")
-    .replace(/\r/g, "\n")
+    .replace(/\r\n?/g, "\n")
     .split("\n")
     .map((line) => cleanText(line))
     .join("\n")
@@ -419,21 +473,24 @@ function normalizeTextBlock(value: string) {
     .trim();
 }
 
-function cleanPageTitle(value = "") {
-  return cleanText(decodeHtmlEntities(value).replace(/\s*-\s*YOUTHISYOURS\s*$/i, ""));
+function joinDescriptionBlocks(...blocks: string[]) {
+  return blocks
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
-function normalizeBrandName(value: string) {
-  const normalized = cleanText(value);
-  if (/^youthisyours$/i.test(normalized)) return "Youth is Yours";
-  return normalized || "Youth is Yours";
+function cleanPageTitle(value = "") {
+  return cleanText(decodeHtmlEntities(value).replace(/\s*SATUR\s*\|\s*세터\s*\|\s*/i, ""));
 }
 
 function cleanSizeName(value: string) {
   const size = cleanText(value)
+    .replace(/\[[^\]]*품절[^\]]*\]/g, "")
+    .replace(/품절/g, "")
     .replace(/^[\s:|/-]+|[\s:|/-]+$/g, "")
     .toUpperCase();
-  if (/^(?:ONE|ONE SIZE|ONESIZE|FREE SIZE|FREE-SIZE)$/.test(size)) return "FREE";
+  if (/^(?:OS|O\/S|ONE|ONE SIZE|ONESIZE|FREE SIZE|FREE-SIZE)$/.test(size)) return "FREE";
   return size;
 }
 
@@ -460,10 +517,6 @@ function decodeHtmlEntities(value: string) {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-function stringValue(value: unknown) {
-  return typeof value === "string" ? value : "";
 }
 
 function asArray(value: unknown): unknown[] {

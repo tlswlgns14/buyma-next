@@ -9,52 +9,49 @@ type Cafe24OptionStock = Record<string, unknown>;
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36";
 
-export const youthisyoursExtractor: ProductExtractor = {
-  site: "youthisyours.net",
-  supports: (url) => url.hostname === "youthisyours.net" || url.hostname.endsWith(".youthisyours.net"),
-  extract: extractYouthisyoursProduct,
+export const sansangearExtractor: ProductExtractor = {
+  site: "sansangear.com",
+  supports: (url) => url.hostname === "sansangear.com" || url.hostname.endsWith(".sansangear.com"),
+  extract: extractSansangearProduct,
 };
 
-async function extractYouthisyoursProduct(url: URL): Promise<ProductDraft> {
+async function extractSansangearProduct(url: URL): Promise<ProductDraft> {
   const html = await fetchHtml(url.toString());
   const jsonLd = extractJsonLdProduct(html);
   const optionStock = extractOptionStockData(html);
   const productNo = extractProductNo(url, html);
-
   const title =
     cleanText(jsonLd?.name) ||
     extractCafe24Variable(html, "product_name") ||
     cleanPageTitle(extractMeta(html, "og:title") || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]);
-  const brandSource = cleanText(asRecord(jsonLd?.brand)?.name) || "Youth is Yours";
-  const buymaBrand = findBuymaBrand(brandSource) || findBuymaBrand("Youth is Yours");
-  const brand = buymaBrand?.name || normalizeBrandName(brandSource);
-  const rawDescriptionKo = normalizeTextBlock(
-    stringValue(jsonLd?.description) || extractMeta(html, "description") || extractMeta(html, "og:description"),
-  );
-  const descriptionKo = normalizeYouthisyoursDescriptionMeasurements(rawDescriptionKo);
+  const buymaBrand = findBuymaBrand("San San Gear");
   const price = parsePrice(firstOfferValue(jsonLd, "price") || extractCafe24Variable(html, "product_price"));
-  const colors = resolveColors(rawDescriptionKo, title);
-  const sizeMeasurements = parseSizeMeasurements(rawDescriptionKo);
+  const colors = resolveColors(title);
+  const sizeGuideHtml = extractTabContent(html, "SIZE GUIDE");
+  const sizeMeasurements = parseSizeGuideMeasurements(sizeGuideHtml);
   const optionSizes = extractSizesFromOptionStock(optionStock);
-  const offerSizes = extractSizesFromOffers(jsonLd, title);
-  const sizes = unique([...optionSizes, ...offerSizes, ...Object.keys(sizeMeasurements)]);
+  const sizes = unique([...optionSizes, ...Object.keys(sizeMeasurements)]);
   const optionStockMap = buildOptionStockMap(optionStock, colors);
   const stockStatus = resolveOverallStockStatus(optionStockMap);
   const images = extractProductImages(html, jsonLd, url);
   const brandLogo = extractBrandLogo(html, url);
+  const descriptionKo = joinDescriptionBlocks(
+    normalizeTextBlock(extractTabContent(html, "DETAILS")),
+    buildSizeGuideDescription(sizeGuideHtml),
+  );
 
   if (!title && images.length === 0) {
-    throw new Error("Youthisyours product information could not be found. Please check the URL.");
+    throw new Error("Sansan Gear product information could not be found. Please check the URL.");
   }
 
   return {
-    site: "youthisyours.net",
+    site: "sansangear.com",
     sourceUrl: url.toString(),
     titleKo: title,
     title,
     titleEn: title,
-    brand,
-    brandDisplayName: buymaBrand?.displayName,
+    brand: buymaBrand?.name || "San San Gear",
+    brandDisplayName: buymaBrand?.displayName || "San San Gear",
     brandId: buymaBrand?.id || "0",
     price,
     colors,
@@ -79,7 +76,7 @@ async function fetchHtml(url: string) {
     },
   });
   if (!response.ok) {
-    throw new Error(`Youthisyours page request failed (${response.status}).`);
+    throw new Error(`Sansan Gear page request failed (${response.status}).`);
   }
   return response.text();
 }
@@ -93,7 +90,7 @@ function extractJsonLdProduct(html: string): JsonLdProduct | null {
       const product = findJsonLdProduct(parsed);
       if (product) return product;
     } catch {
-      // Ignore malformed analytics JSON-LD blocks.
+      // Ignore malformed JSON-LD blocks.
     }
   }
 
@@ -171,15 +168,12 @@ function extractProductNo(url: URL, html: string) {
   );
 }
 
-function resolveColors(description: string, title: string) {
-  const colorLine = description.match(/(?:^|\n)\s*COLOR\s*\|\s*([^\n]+)/i)?.[1] || "";
-  const titleColor = title.match(/\(([^()]+)\)\s*$/)?.[1] || "";
-  const source = colorLine || titleColor;
-
+function resolveColors(title: string) {
+  const bracketColor = title.match(/\[([^\]]+)\]/)?.[1] || "";
   return unique(
-    source
+    bracketColor
       .split(/[,/|]/)
-      .map((color) => cleanText(color.replace(/\bCOLOR\b/gi, "")))
+      .map((color) => cleanText(color))
       .map(convertColorToEnglish)
       .filter(isUsefulColor),
   );
@@ -195,22 +189,6 @@ function extractSizesFromOptionStock(optionStock: Record<string, Cafe24OptionSto
       .map(cleanSizeName)
       .filter(isLikelySizeName),
   );
-}
-
-function extractSizesFromOffers(jsonLd: JsonLdProduct | null, title: string) {
-  return unique(
-    asArray(jsonLd?.offers)
-      .map((offer) => asRecord(offer))
-      .filter((offer): offer is Record<string, unknown> => Boolean(offer))
-      .map((offer) => extractSizeFromOfferName(cleanText(offer.name), title))
-      .filter(isLikelySizeName),
-  );
-}
-
-function extractSizeFromOfferName(name: string, title: string) {
-  if (!name) return "";
-  const suffix = name.startsWith(title) ? name.slice(title.length) : name.split(/\s+/).at(-1) || "";
-  return cleanSizeName(suffix);
 }
 
 function buildOptionStockMap(optionStock: Record<string, Cafe24OptionStock>, colors: string[]) {
@@ -248,68 +226,99 @@ function resolveOverallStockStatus(optionStockMap: Record<string, StockStatus>):
   return values.some((stock) => stock === "1") ? "1" : "0";
 }
 
-function parseSizeMeasurements(description: string) {
-  const measurements: Record<string, Record<string, string>> = {};
-  let currentSize = "";
-
-  description.split(/\n+/).forEach((line) => {
-    const text = cleanText(line);
-    if (!text) return;
-
-    const size = text.match(/^([A-Z0-9][A-Z0-9./+-]{0,12})\s+SIZE$/i)?.[1];
-    if (size && isLikelySizeName(size)) {
-      currentSize = cleanSizeName(size);
-      measurements[currentSize] = measurements[currentSize] || {};
-      return;
-    }
-
-    if (!currentSize) return;
-
-    const measurement = text.match(/^([A-Z][A-Z\s./-]*?)\s+([0-9]+(?:\.[0-9]+)?)\s*(?:CM)?$/i);
-    if (!measurement) return;
-
-    const mapping = normalizeMeasurementKey(measurement[1]);
-    if (mapping) measurements[currentSize][mapping.key] = formatMeasurementValue(measurement[2], mapping.multiplier);
-  });
-
-  return Object.fromEntries(Object.entries(measurements).filter(([, values]) => Object.keys(values).length));
+function extractTabContent(html: string, label: string) {
+  const escaped = escapeRegExp(label);
+  const match = html.match(new RegExp(`<a[^>]*>\\s*${escaped}\\s*<\\/a>\\s*<ol[^>]*>([\\s\\S]*?)<\\/ol>`, "i"));
+  return match?.[1] || "";
 }
 
-function normalizeYouthisyoursDescriptionMeasurements(description: string) {
-  return description
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .map((line) =>
-      line.replace(/^(\s*)(CHEST|BUST)(\s+)([0-9]+(?:\.[0-9]+)?)(\s*CM?)?\s*$/i, (
-        _match: string,
-        indent: string,
-        label: string,
-        space: string,
-        value: string,
-        unit: string,
-      ) => `${indent}${label.toUpperCase()}${space}${formatMeasurementValue(value, 2)}${unit || "cm"}`),
+function parseSizeGuideMeasurements(sizeGuideHtml: string) {
+  const rows = parseHtmlTableRows(sizeGuideHtml);
+  if (rows.length < 2) return {};
+
+  const headers = rows[0].map(normalizeSizeGuideHeader);
+  const measurements: Record<string, Record<string, string>> = {};
+
+  rows.slice(1).forEach((cells) => {
+    const size = cleanSizeName(cells[0]);
+    if (!isLikelySizeName(size)) return;
+
+    const row: Record<string, string> = {};
+    headers.slice(1).forEach((header, headerIndex) => {
+      const value = cleanText(cells[headerIndex + 1]);
+      if (!value || !header) return;
+
+      const mapping = normalizeMeasurementKey(header);
+      if (!mapping) return;
+      row[mapping.key] = formatMeasurementValue(value, mapping.multiplier);
+    });
+
+    if (Object.keys(row).length) measurements[size] = row;
+  });
+
+  return measurements;
+}
+
+function buildSizeGuideDescription(sizeGuideHtml: string) {
+  const rows = parseHtmlTableRows(sizeGuideHtml);
+  if (rows.length < 2) return "";
+
+  const headers = rows[0].map((header) => cleanText(header));
+  const lines = ["SIZE GUIDE"];
+  rows.slice(1).forEach((cells) => {
+    const size = cleanSizeName(cells[0]);
+    if (!isLikelySizeName(size)) return;
+
+    lines.push(`${size} SIZE`);
+    headers.slice(1).forEach((header, headerIndex) => {
+      const value = cleanText(cells[headerIndex + 1]);
+      if (!header || !value) return;
+      lines.push(`${header} ${formatSizeGuideDescriptionValue(value)}`);
+    });
+  });
+
+  return lines.length > 1 ? lines.join("\n") : "";
+}
+
+function formatSizeGuideDescriptionValue(value: string) {
+  const text = cleanText(value);
+  if (!text || /cm$/i.test(text) || !/^\d+(?:\.\d+)?$/.test(text)) return text;
+  return `${text}cm`;
+}
+
+function parseHtmlTableRows(html: string) {
+  return Array.from(html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi))
+    .map((rowMatch) =>
+      Array.from(rowMatch[1].matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi))
+        .map((cellMatch) => normalizeTextBlock(cellMatch[1])),
     )
-    .join("\n")
-    .trim();
+    .filter((row) => row.length > 0);
+}
+
+function normalizeSizeGuideHeader(value: string) {
+  return cleanText(value).replace(/\s+/g, " ").toUpperCase();
 }
 
 function normalizeMeasurementKey(value: string): { key: string; multiplier?: number } | null {
   const key = cleanText(value).replace(/\s+/g, " ").toUpperCase();
-  if (key === "WAIST" || key === "WAIST WIDTH") return { key: "waist" };
-  if (key === "HIP" || key === "HIPS") return { key: "hips" };
+  if (key === "WIDTH") return { key: "頭周り", multiplier: 2 };
+  if (key === "HEIGHT") return { key: "高さ" };
+  if (key === "BRIM" || key === "VISOR") return { key: "つば" };
+  if (key === "LENGTH" || key === "TOTAL LENGTH") return { key: "length" };
   if (key === "SHOULDER" || key === "SHOULDER WIDTH") return { key: "shoulder" };
   if (key === "CHEST" || key === "BUST") return { key: "chest", multiplier: 2 };
   if (key === "SLEEVE" || key === "SLEEVE LENGTH") return { key: "sleevelength" };
+  if (key === "WAIST" || key === "WAIST WIDTH") return { key: "waist" };
+  if (key === "HIP" || key === "HIPS") return { key: "hips" };
   if (key === "HEM" || key === "HEM WIDE" || key === "HEM WIDTH" || key === "BOTTOM WIDTH") return { key: "hemwidth" };
-  if (key === "RISE" || key === "RISE LENGTH" || key === "FRONT RISE" || key === "CROTCH") return { key: "rise" };
   if (key === "THIGH" || key === "THIGH WIDTH" || key === "TIGHT") return { key: "thighwidth" };
+  if (key === "RISE" || key === "RISE LENGTH" || key === "FRONT RISE" || key === "CROTCH") return { key: "rise" };
   if (key === "INSEAM") return { key: "inseam" };
-  if (key === "LENGTH" || key === "TOTAL LENGTH") return { key: "length" };
   return null;
 }
 
 function formatMeasurementValue(value: string, multiplier = 1) {
-  const numeric = Number(value);
+  const numeric = Number(cleanText(value).replace(/cm$/i, ""));
   if (!Number.isFinite(numeric)) return value;
   const result = numeric * multiplier;
   return Number.isInteger(result) ? String(result) : String(Number(result.toFixed(1)));
@@ -326,7 +335,8 @@ function extractProductImages(html: string, jsonLd: JsonLdProduct | null, baseUr
   return unique(
     imageCandidates
       .map((src) => resolveUrl(cleanText(src), baseUrl))
-      .filter(isProductImageUrl),
+      .filter(isProductImageUrl)
+      .map(preferLargeProductImage),
   ).slice(0, 20);
 }
 
@@ -334,7 +344,7 @@ function extractBrandLogo(html: string, baseUrl: URL) {
   const logo = extractHtmlImages(html).find((image) => {
     const alt = cleanText(image.alt).toLowerCase();
     const src = image.src.toLowerCase();
-    return alt.includes("logo") || alt.includes("로고") || src.includes("/category/editor/");
+    return alt.includes("logo") || alt.includes("로고") || src.includes("/web/upload/images/logo");
   });
 
   return logo ? resolveUrl(logo.src, baseUrl) : "";
@@ -367,14 +377,24 @@ function isProductImageUrl(value: string) {
   if (src.includes("img.echosting.cafe24.com")) return false;
   if (src.includes("btn_") || src.includes("basket") || src.includes("qrcode")) return false;
   if (src.includes("/category/editor/")) return false;
-  return src.includes("/web/product/") || src.includes("/web/upload/nneditor/");
+  if (src.includes("/web/upload/images/")) return false;
+  return src.includes("/web/product/");
+}
+
+function preferLargeProductImage(value: string) {
+  return value
+    .replace("/web/product/small/", "/web/product/big/")
+    .replace("/web/product/extra/small/", "/web/product/extra/big/");
 }
 
 function resolveUrl(value: string, baseUrl: URL) {
   if (!value) return "";
-  if (value.startsWith("//")) return `${baseUrl.protocol}${value}`;
+  const cleanValue = value.replace(/\\\//g, "/").trim();
+  const embeddedAbsoluteUrl = cleanValue.match(/https?:\/\/.+$/i)?.[0];
+  if (embeddedAbsoluteUrl) return embeddedAbsoluteUrl;
+  if (cleanValue.startsWith("//")) return `${baseUrl.protocol}${cleanValue}`;
   try {
-    return new URL(value, baseUrl).toString();
+    return new URL(cleanValue, baseUrl).toString();
   } catch {
     return "";
   }
@@ -408,8 +428,11 @@ function extractMeta(html: string, property: string) {
 
 function normalizeTextBlock(value: string) {
   return decodeHtmlEntities(value)
+    .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/p>/gi, "\n")
+    .replace(/<\/tr>/gi, "\n")
+    .replace(/<\/t[dh]>/gi, "\n")
     .replace(/<[^>]*>/g, " ")
     .replace(/\r/g, "\n")
     .split("\n")
@@ -419,27 +442,28 @@ function normalizeTextBlock(value: string) {
     .trim();
 }
 
-function cleanPageTitle(value = "") {
-  return cleanText(decodeHtmlEntities(value).replace(/\s*-\s*YOUTHISYOURS\s*$/i, ""));
+function joinDescriptionBlocks(...blocks: string[]) {
+  return blocks
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .join("\n\n");
 }
 
-function normalizeBrandName(value: string) {
-  const normalized = cleanText(value);
-  if (/^youthisyours$/i.test(normalized)) return "Youth is Yours";
-  return normalized || "Youth is Yours";
+function cleanPageTitle(value = "") {
+  return cleanText(decodeHtmlEntities(value).replace(/\s*-\s*SAN SAN GEAR\s*$/i, ""));
 }
 
 function cleanSizeName(value: string) {
   const size = cleanText(value)
     .replace(/^[\s:|/-]+|[\s:|/-]+$/g, "")
     .toUpperCase();
-  if (/^(?:ONE|ONE SIZE|ONESIZE|FREE SIZE|FREE-SIZE)$/.test(size)) return "FREE";
+  if (/^(?:OS|O\/S|ONE|ONE SIZE|ONESIZE|FREE SIZE|FREE-SIZE)$/.test(size)) return "FREE";
   return size;
 }
 
 function isLikelySizeName(value: string) {
   const size = cleanSizeName(value);
-  return Boolean(size) && size.length <= 16 && !/^(SIZE|COLOR|OPTION|SELECT|필수)$/.test(size);
+  return Boolean(size) && size.length <= 16 && !/^(SIZE|COLOR|OPTION|SELECT|필수|ACC)$/.test(size);
 }
 
 function isUsefulColor(value: string) {
@@ -460,10 +484,6 @@ function decodeHtmlEntities(value: string) {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-function stringValue(value: unknown) {
-  return typeof value === "string" ? value : "";
 }
 
 function asArray(value: unknown): unknown[] {

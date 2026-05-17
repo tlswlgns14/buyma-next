@@ -2,7 +2,7 @@ import { MEASUREMENT_HEADERS } from "./data";
 import { BUYMA_SIZES, BUYMA_SIZE_DETAILS } from "./id-data";
 import { findBuymaBrand } from "./brands";
 import { getJapaneseBrandDescription } from "./brand-descriptions";
-import type { BuymaSettings, ColorSizeRow, CsvBundle, ProductDraft, StockStatus } from "./types";
+import type { BuymaDescriptionPlacement, BuymaSettings, ColorSizeRow, CsvBundle, ProductDraft, StockStatus } from "./types";
 import {
   calculateSellingPrice,
   cleanText,
@@ -111,6 +111,7 @@ const COLOR_SIZE_MEASUREMENT_HEADERS = [
 ];
 
 const MEASUREMENT_HEADERS_BY_CATEGORY = BUYMA_SIZE_DETAILS.reduce((map, detail) => {
+  if (!isSupportedMeasurementGroup(detail.groupName)) return map;
   const categoryId = cleanText(detail.categoryId);
   const name = cleanText(detail.name);
   if (!categoryId || !name) return map;
@@ -153,7 +154,7 @@ export function generateItemsCsv(products: ProductDraft[], settings: BuymaSettin
     const sku = resolveSku(product, index);
     const title = truncateBuymaTitle(normalizeBuymaTitle(product, settings.productTitlePrefix));
     const sellingPrice = resolveSellingPrice(product, settings);
-    const description = buildDescription(product, settings.productDescriptionPrefix);
+    const description = buildDescription(product, settings.productDescriptionPrefix, settings.productDescriptionPlacement);
     const imageSlots = getImageSlots(product, index);
     const brandInfo = findBuymaBrand(product.brand || product.brandDisplayName || title);
     const brandId = product.brandId ? product.brandId : brandInfo?.id || "0";
@@ -486,20 +487,36 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function buildDescription(product: ProductDraft, descriptionPrefix = "") {
+function buildDescription(product: ProductDraft, descriptionPrefix = "", placement: BuymaDescriptionPlacement = "before") {
   return applyDescriptionPrefix(
     getJapaneseBrandDescription(product) || product.description || "",
     descriptionPrefix,
+    placement,
   );
 }
 
-function applyDescriptionPrefix(description: string, prefix = "") {
+function applyDescriptionPrefix(
+  description: string,
+  prefix = "",
+  placement: BuymaDescriptionPlacement = "before",
+) {
   const cleanPrefix = String(prefix ?? "").trim();
   const cleanDescription = String(description ?? "").trim();
   if (!cleanPrefix) return cleanDescription;
   if (!cleanDescription) return cleanPrefix;
-  if (cleanDescription.startsWith(cleanPrefix)) return cleanDescription;
-  return `${cleanPrefix}\n${cleanDescription}`;
+  const descriptionWithoutPrefix = removeDescriptionAffix(cleanDescription, cleanPrefix);
+  if (!descriptionWithoutPrefix) return cleanPrefix;
+  if (placement === "after") {
+    return `${descriptionWithoutPrefix}\n${cleanPrefix}`;
+  }
+  return `${cleanPrefix}\n${descriptionWithoutPrefix}`;
+}
+
+function removeDescriptionAffix(description: string, affix: string) {
+  if (description === affix) return "";
+  if (description.startsWith(`${affix}\n`)) return description.slice(affix.length).trim();
+  if (description.endsWith(`\n${affix}`)) return description.slice(0, -affix.length).trim();
+  return description;
 }
 
 function getColorSizeRows(
@@ -546,19 +563,23 @@ function findStockStatus(product: ProductDraft, color: string, size: string): St
 }
 
 function getMeasurementValues(product: ProductDraft, size: string) {
+  const allowedHeaders = getAllowedMeasurementHeaders(product.category);
+  if (!allowedHeaders) {
+    return COLOR_SIZE_MEASUREMENT_HEADERS.map(() => "");
+  }
+
   const measurements = product.sizeMeasurements ?? {};
   const exact = measurements[size.toUpperCase()] || measurements[size] || findMeasurementRow(measurements, size) || {};
   const normalized = normalizeMeasurementValues(exact);
-  const allowedHeaders = getAllowedMeasurementHeaders(product.category);
 
-  if (allowedHeaders) {
-    return COLOR_SIZE_MEASUREMENT_HEADERS.map((header) => {
-      if (!allowedHeaders.has(header)) return "";
-      return getNormalizedMeasurementValue(normalized, header);
-    });
-  }
+  return COLOR_SIZE_MEASUREMENT_HEADERS.map((header) => {
+    if (!allowedHeaders.has(header)) return "";
+    return getNormalizedMeasurementValue(normalized, header);
+  });
+}
 
-  return COLOR_SIZE_MEASUREMENT_HEADERS.map((header) => getNormalizedMeasurementValue(normalized, header));
+function isSupportedMeasurementGroup(groupName: unknown) {
+  return /^(?:トップス|ボトムス|ワンピース)/.test(cleanText(groupName));
 }
 
 function getAllowedMeasurementHeaders(categoryId: unknown) {
@@ -588,7 +609,7 @@ function normalizeMeasurementValues(values: Record<string, string>) {
   const normalized: Record<string, string> = {};
 
   MEASUREMENT_HEADERS.forEach((header) => {
-    const value = cleanText(values[header]);
+    const value = normalizeCsvMeasurementValue(values[header]);
     if (value && !isBlankMeasurementValue(value)) normalized[header] = value;
   });
 
@@ -596,9 +617,10 @@ function normalizeMeasurementValues(values: Record<string, string>) {
     const mapping = resolveMeasurementHeader(key);
     if (!mapping) return;
 
-    const value = mapping.multiplier === 2
+    const mappedValue = mapping.multiplier === 2
       ? multiplyMeasurementValue(rawValue, mapping.multiplier)
       : cleanText(rawValue);
+    const value = normalizeCsvMeasurementValue(mappedValue);
     if (value && !isBlankMeasurementValue(value) && !normalized[mapping.header]) {
       normalized[mapping.header] = value;
     }
@@ -609,6 +631,13 @@ function normalizeMeasurementValues(values: Record<string, string>) {
 
 function isBlankMeasurementValue(value: unknown) {
   return /^(?:null|undefined|-)?$/i.test(cleanText(value));
+}
+
+function normalizeCsvMeasurementValue(value: unknown) {
+  const text = cleanText(value).replace(/cm$/i, "").trim();
+  if (!text || isBlankMeasurementValue(text)) return "";
+  const numberMatch = text.match(/^\d+(?:\.\d+)?$/);
+  return numberMatch ? formatMeasurementNumber(Number(text)) : "";
 }
 
 function resolveMeasurementHeader(key: string): { header: string; multiplier?: number } | null {
@@ -636,13 +665,16 @@ function resolveMeasurementHeader(key: string): { header: string; multiplier?: n
   if (["ヒップ", "엉덩이단면", "엉덩이너비", "엉덩이폭", "엉덩이둘레", "엉덩이", "힙", "힙단면", "hip", "hips"].includes(label)) {
     return { header: "ヒップ" };
   }
-  if (["股上", "밑위", "앞밑위", "rise", "frontrise"].includes(label)) {
+  if (["股上", "밑위", "앞밑위", "rise", "riselength", "frontrise", "crotch"].includes(label)) {
     return { header: "股上" };
   }
-  if (["すそ周り", "裾周り", "밑단", "밑단단면", "밑단너비", "밑단폭", "hem", "hemwidth", "legopening"].includes(label)) {
+  if (["股下", "밑아래", "밑아래길이", "인심", "inseam"].includes(label)) {
+    return { header: "股下" };
+  }
+  if (["すそ周り", "裾周り", "밑단", "밑단단면", "밑단너비", "밑단폭", "hem", "hemwidth", "bottomwidth", "legopening"].includes(label)) {
     return { header: "すそ周り" };
   }
-  if (["もも周り", "허벅지단면", "허벅지너비", "허벅지폭", "허벅지둘레", "허벅지", "thigh", "thighwidth"].includes(label)) {
+  if (["もも周り", "허벅지단면", "허벅지너비", "허벅지폭", "허벅지둘레", "허벅지", "thigh", "thighwidth", "tight"].includes(label)) {
     return { header: "もも周り" };
   }
 

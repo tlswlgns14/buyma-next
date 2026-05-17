@@ -7,7 +7,7 @@ import ProductManager from "@/components/ProductManager";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatAccessDate, isAccessExpired } from "@/lib/access";
 
-type DashboardMenuKey = "product-management" | "competitor-prices";
+type DashboardMenuKey = "product-management" | "competitor-prices" | "sourcing-sites";
 
 type DashboardMenu = {
   key: DashboardMenuKey;
@@ -25,6 +25,57 @@ const dashboardMenus: DashboardMenu[] = [
     key: "competitor-prices",
     label: "경쟁가격확인",
     title: "경쟁가격확인",
+  },
+  {
+    key: "sourcing-sites",
+    label: "소싱사이트내역",
+    title: "소싱사이트내역",
+  },
+];
+
+const sourcingSites = [
+  {
+    name: "MUSINSA",
+    domain: "musinsa.com",
+    status: "지원중",
+    urls: [
+      "https://www.musinsa.com/products/{상품번호}",
+      "https://www.musinsa.com/app/goods/{상품번호}",
+    ],
+  },
+  {
+    name: "Youthisyours",
+    domain: "youthisyours.net",
+    status: "지원중",
+    urls: [
+      "https://youthisyours.net/product/detail.html?product_no={상품번호}",
+    ],
+  },
+  {
+    name: "SAN SAN GEAR",
+    domain: "sansangear.com",
+    status: "지원중",
+    urls: [
+      "https://sansangear.com/product/detail.html?product_no={상품번호}",
+    ],
+  },
+  {
+    name: "ADERERROR",
+    domain: "adererror.com",
+    status: "지원중",
+    urls: [
+      "https://adererror.com/kr/shop/{상품번호}",
+      "https://adererror.com/kr/shop/{상품번호}?header_idx={헤더번호}",
+    ],
+  },
+  {
+    name: "SATUR",
+    domain: "satur.co.kr",
+    status: "지원중",
+    urls: [
+      "https://www.satur.co.kr/product/{상품명}/{상품번호}/category/{카테고리번호}/display/1/",
+      "https://satur.co.kr/product/{상품명}/{상품번호}/",
+    ],
   },
 ];
 
@@ -212,9 +263,61 @@ function renderDashboardContent(activeMenu: DashboardMenuKey) {
       return <ProductManager />;
     case "competitor-prices":
       return <CompetitorPriceChecker />;
+    case "sourcing-sites":
+      return <SourcingSitesPanel />;
     default:
       return null;
   }
+}
+
+function SourcingSitesPanel() {
+  return (
+    <section className="grid gap-4">
+      <div className="rounded-lg border border-black/10 bg-white p-5 shadow-[0_12px_32px_rgba(61,48,35,0.08)]">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-black/10 pb-4">
+          <div>
+            <h2 className="text-lg font-extrabold text-[#151515]">현재 취급 URL 목록</h2>
+            <p className="mt-1 text-sm font-semibold text-[#6c655b]">
+              상품관리에서 수집 가능한 소싱 사이트와 URL 형식입니다.
+            </p>
+          </div>
+          <span className="rounded-full bg-[#151515] px-3 py-1 text-xs font-extrabold text-white">
+            {sourcingSites.length}개 사이트
+          </span>
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          {sourcingSites.map((site) => (
+            <article
+              key={site.domain}
+              className="rounded-lg border border-black/10 bg-[#fbfaf7] p-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-base font-extrabold text-[#151515]">{site.name}</h3>
+                  <p className="mt-0.5 text-sm font-bold text-[#6c655b]">{site.domain}</p>
+                </div>
+                <span className="rounded-full border border-[#2d73ff]/20 bg-[#f4f7ff] px-3 py-1 text-xs font-extrabold text-[#2d73ff]">
+                  {site.status}
+                </span>
+              </div>
+
+              <ul className="mt-3 grid gap-2">
+                {site.urls.map((url) => (
+                  <li
+                    key={url}
+                    className="break-all rounded-md border border-black/10 bg-white px-3 py-2 font-mono text-sm font-bold text-[#2f3742]"
+                  >
+                    {url}
+                  </li>
+                ))}
+              </ul>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function getDisplayName(

@@ -12,6 +12,7 @@ export const DEFAULT_BUYMA_SETTINGS: BuymaSettings = {
   defaultReferencePrice: 0,
   productTitlePrefix: "",
   productDescriptionPrefix: "",
+  productDescriptionPlacement: "before",
   shippingMethods: DEFAULT_BUYMA_SHIPPING_METHODS,
   shippingMethodsInitialized: true,
   shippingMethodsVersion: BUYMA_SHIPPING_METHODS_VERSION,

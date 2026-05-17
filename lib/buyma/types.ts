@@ -1,4 +1,4 @@
-export type ProductSite = "musinsa.com" | "youthisyours.net" | "ssfshop.com" | "29cm.co.kr" | "unknown";
+export type ProductSite = "musinsa.com" | "youthisyours.net" | "sansangear.com" | "adererror.com" | "satur.co.kr" | "ssfshop.com" | "29cm.co.kr" | "unknown";
 
 export type ProductDraft = {
   site: ProductSite;
@@ -129,12 +129,15 @@ export type ColorSizeRow = {
   stock: StockStatus;
 };
 
+export type BuymaDescriptionPlacement = "before" | "after";
+
 export type BuymaSettings = {
   marginRate: number;
   exchangeRate: number;
   defaultReferencePrice: number;
   productTitlePrefix: string;
   productDescriptionPrefix: string;
+  productDescriptionPlacement: BuymaDescriptionPlacement;
   shippingMethods: BuymaShippingMethod[];
   shippingMethodsInitialized: boolean;
   shippingMethodsVersion: number;
