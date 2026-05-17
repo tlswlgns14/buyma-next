@@ -596,13 +596,20 @@ async function loadProductRows(userId: string) {
 
 async function saveProductList(userId: string, products: TrackedBuymaProduct[]) {
   const rows = products.map((product) => productToUpsertRow(userId, product));
-  const { error } = await supabase
+  const result = await supabase
     .from("competitor_price_products")
     .upsert(rows, { onConflict: "user_id,merge_key" });
 
-  if (error) {
-    throw error;
+  if (!result.error) {
+    return;
   }
+
+  const legacyRows = rows.map(({ csv_order, csv_imported_at, ...row }) => row);
+  const { error } = await supabase
+    .from("competitor_price_products")
+    .upsert(legacyRows, { onConflict: "user_id,merge_key" });
+
+  if (error) throw error;
 }
 
 async function saveProductPatch(
