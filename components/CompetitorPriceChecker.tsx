@@ -206,15 +206,22 @@ export default function CompetitorPriceChecker() {
     setPastedCsv("");
   }
 
-  async function checkProduct(product: TrackedBuymaProduct) {
+  async function checkProduct(product: TrackedBuymaProduct, options?: { silent?: boolean }) {
     const keyword = product.searchKeyword || product.title;
+    const productLabel = getProductLabel(product);
     if (!product.searchUrl && !keyword) {
       updateProduct(product.id, { error: "검색 URL 또는 검색어가 없습니다." });
+      if (!options?.silent) {
+        setStatus(`${productLabel} 확인 실패: 검색 URL 또는 검색어가 없습니다.`);
+      }
       return;
     }
 
     setCheckingIds((current) => new Set(current).add(product.id));
     updateProduct(product.id, { error: undefined });
+    if (!options?.silent) {
+      setStatus(`${productLabel} 가격 확인 중입니다.`);
+    }
 
     try {
       const response = await fetch("/api/buyma/competitor-prices", {
@@ -228,10 +235,14 @@ export default function CompetitorPriceChecker() {
       const data = (await response.json()) as BuymaCompetitorPriceResponse;
 
       if (!response.ok || !data.ok) {
+        const message = data.ok ? "가격 확인에 실패했습니다." : data.error;
         updateProduct(product.id, {
-          error: data.ok ? "가격 확인에 실패했습니다." : data.error,
+          error: message,
           lastCheckedAt: new Date().toISOString(),
         });
+        if (!options?.silent) {
+          setStatus(`${productLabel} 확인 실패: ${message}`);
+        }
         return;
       }
 
@@ -254,11 +265,23 @@ export default function CompetitorPriceChecker() {
         lastResults: data.results,
         error: data.results.length ? undefined : "검색 결과에서 가격을 찾지 못했습니다.",
       });
+      if (!options?.silent) {
+        setStatus(`${productLabel} 확인 완료${filterMode === "unchecked" ? " - 미확인만 보기에서는 확인된 상품이 목록에서 빠집니다." : ""}`);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "가격 확인에 실패했습니다.";
       updateProduct(product.id, { error: message, lastCheckedAt: new Date().toISOString() });
+      if (!options?.silent) {
+        setStatus(`${productLabel} 확인 실패: ${message}`);
+      }
     } finally {
       setCheckingIds((current) => {
+        const next = new Set(current);
+        next.delete(product.id);
+        return next;
+      });
+      setSelectedProductIds((current) => {
+        if (!current.has(product.id)) return current;
         const next = new Set(current);
         next.delete(product.id);
         return next;
@@ -320,7 +343,7 @@ export default function CompetitorPriceChecker() {
 
     try {
       for (let index = 0; index < targets.length; index += 1) {
-        await checkProduct(targets[index]);
+        await checkProduct(targets[index], { silent: true });
         if (index < targets.length - 1) {
           await delay(800);
         }
@@ -732,7 +755,7 @@ export default function CompetitorPriceChecker() {
               ) : (
                 <tr>
                   <td colSpan={8} className="px-4 py-12 text-center text-sm font-bold text-[#6c655b]">
-                    등록된 추적 상품이 없습니다.
+                    {getEmptyMessage(filterMode)}
                   </td>
                 </tr>
               )}
@@ -914,6 +937,16 @@ function filterTrackedProducts(products: TrackedBuymaProduct[], filterMode: Prod
   }
 
   return products;
+}
+
+function getProductLabel(product: TrackedBuymaProduct) {
+  return product.title || product.buymaProductId || "상품";
+}
+
+function getEmptyMessage(filterMode: ProductFilterMode) {
+  if (filterMode === "unchecked") return "미확인 상품이 없습니다.";
+  if (filterMode === "checked") return "확인된 상품이 없습니다.";
+  return "등록된 추적 상품이 없습니다.";
 }
 
 function sortTrackedProducts(products: TrackedBuymaProduct[], sortMode: SortMode) {
