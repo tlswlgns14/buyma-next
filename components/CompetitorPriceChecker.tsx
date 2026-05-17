@@ -294,13 +294,14 @@ export default function CompetitorPriceChecker() {
 
   function downloadSampleCsv() {
     const content = [
-      "buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url",
-      "123456789,https://www.buyma.com/item/123456789/,HATCHINGROOM Abstract H Tee,HATCHINGROOM,,10100,HATCHINGROOM Abstract H Tee,",
+      "商品ID,商品名,ブランド名,単価,ブランド品番1,検索キーワード,検索URL",
+      "123456789,HATCHINGROOM Abstract H Tee,HATCHINGROOM,10100,HR-HT-001,,",
+      "123456790,SATUR Teo Denim Blouson Jacket,SATUR,24630,,,",
     ].join("\n");
     const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
-    link.download = "buyma-competitor-price-sample.csv";
+    link.download = "buyma-items-competitor-price-sample.csv";
     link.click();
     URL.revokeObjectURL(url);
   }
