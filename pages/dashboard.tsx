@@ -77,6 +77,23 @@ const sourcingSites = [
       "https://satur.co.kr/product/{상품명}/{상품번호}/",
     ],
   },
+  {
+    name: "THE NORTH FACE",
+    domain: "thenorthfacekorea.co.kr",
+    status: "지원중",
+    urls: [
+      "https://www.thenorthfacekorea.co.kr/product/{상품코드}",
+    ],
+  },
+  {
+    name: "999HUMANITY",
+    domain: "999humanity.kr",
+    status: "지원중",
+    urls: [
+      "https://999humanity.kr/product/detail.html?product_no={상품번호}",
+      "https://999humanity.kr/product/{상품명}/{상품번호}/",
+    ],
+  },
 ];
 
 export default function Dashboard() {

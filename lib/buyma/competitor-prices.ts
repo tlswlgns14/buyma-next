@@ -97,6 +97,51 @@ export function validatePublicBuymaUrl(value: string) {
   return url.toString();
 }
 
+export async function fetchBuymaCompetitorPrices(input: {
+  searchUrl?: string;
+  keyword?: string;
+}): Promise<BuymaCompetitorPriceResponse> {
+  const rawSearchUrl = input.searchUrl?.trim() ?? "";
+  const keyword = input.keyword?.trim() ?? "";
+  const searchUrl = rawSearchUrl ? validatePublicBuymaUrl(rawSearchUrl) : validatePublicBuymaUrl(buildBuymaSearchUrl(keyword));
+
+  if (!searchUrl) {
+    return {
+      ok: false,
+      error: "BUYMA 검색 URL 또는 검색어를 입력해 주세요.",
+    };
+  }
+
+  try {
+    const response = await fetch(searchUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; BuymaPriceChecker/1.0)",
+        "Accept-Language": "ja,en;q=0.8,ko;q=0.7",
+      },
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: `BUYMA 검색 결과를 가져오지 못했습니다. (${response.status})`,
+      };
+    }
+
+    const html = await response.text();
+    const results = parseBuymaSearchResults(html, searchUrl);
+
+    return {
+      ok: true,
+      searchUrl,
+      checkedAt: new Date().toISOString(),
+      results,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "BUYMA 가격 확인에 실패했습니다.";
+    return { ok: false, error: message };
+  }
+}
+
 function htmlToText(html: string) {
   return decodeHtmlEntities(
     html

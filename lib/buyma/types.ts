@@ -1,4 +1,4 @@
-export type ProductSite = "musinsa.com" | "youthisyours.net" | "sansangear.com" | "adererror.com" | "satur.co.kr" | "ssfshop.com" | "29cm.co.kr" | "unknown";
+export type ProductSite = "musinsa.com" | "youthisyours.net" | "sansangear.com" | "adererror.com" | "satur.co.kr" | "thenorthfacekorea.co.kr" | "999humanity.kr" | "ssfshop.com" | "29cm.co.kr" | "unknown";
 
 export type ProductDraft = {
   site: ProductSite;
@@ -29,6 +29,7 @@ export type ProductDraft = {
   colorSystemMap?: Record<string, string>;
   images: string[];
   brandLogo?: string;
+  brandLogos?: string[];
   editedImage?: string;
   uploadedImageUrls?: string[];
   buymaProductId?: string;

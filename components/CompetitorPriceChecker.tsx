@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ChangeEvent } from "react";
 
+import { useAuth } from "@/contexts/AuthContext";
 import {
   normalizeBuymaShopperName,
   type BuymaCompetitorPriceItem,
   type BuymaCompetitorPriceResponse,
 } from "@/lib/buyma/competitor-prices";
+import { supabase } from "@/lib/supabase";
 
 type TrackedStatus = "active" | "paused" | "missing" | "ended";
 
@@ -28,15 +30,39 @@ type TrackedBuymaProduct = {
   error?: string;
 };
 
-const STORAGE_KEY = "buyma-next:competitor-price-products";
-const OWNER_STORAGE_KEY = "buyma-next:competitor-price-owner";
+type CompetitorPriceProductRow = {
+  id: string;
+  merge_key: string;
+  buyma_product_id: string | null;
+  buyma_url: string | null;
+  title: string | null;
+  brand: string | null;
+  model_number: string | null;
+  own_price: number | null;
+  search_keyword: string | null;
+  search_url: string | null;
+  status: TrackedStatus;
+  last_checked_at: string | null;
+  last_search_url: string | null;
+  reference_price: number | null;
+  lower_competitors: unknown;
+  last_results: unknown;
+  error: string | null;
+};
+
+const DEFAULT_OWNER_NAME = "sonokoro";
+const BATCH_LIMIT = 50;
 
 export default function CompetitorPriceChecker() {
+  const { authUser, session } = useAuth();
+  const userId = authUser?.id ?? "";
   const [products, setProducts] = useState<TrackedBuymaProduct[]>([]);
-  const [ownerName, setOwnerName] = useState("sonokoro");
+  const [ownerName, setOwnerName] = useState(DEFAULT_OWNER_NAME);
   const [pastedCsv, setPastedCsv] = useState("");
   const [status, setStatus] = useState("CSV를 업로드하거나 붙여넣어 주세요.");
   const [checkingIds, setCheckingIds] = useState<Set<string>>(() => new Set());
+  const [checkingBatch, setCheckingBatch] = useState(false);
+  const [trackingLoaded, setTrackingLoaded] = useState(false);
 
   const activeProducts = useMemo(
     () => products.filter((product) => product.status === "active"),
@@ -51,19 +77,55 @@ export default function CompetitorPriceChecker() {
     [products],
   );
 
-  useEffect(() => {
-    setProducts(loadStoredProducts());
-    const storedOwner = window.localStorage.getItem(OWNER_STORAGE_KEY);
-    if (storedOwner?.trim()) setOwnerName(storedOwner.trim());
-  }, []);
+  const loadTrackingData = useCallback(async () => {
+    if (!userId) return;
+
+    setTrackingLoaded(false);
+
+    const [{ data: setting, error: settingError }, { data: rows, error: productError }] =
+      await Promise.all([
+        supabase
+          .from("competitor_price_settings")
+          .select("owner_name")
+          .eq("user_id", userId)
+          .maybeSingle(),
+        supabase
+          .from("competitor_price_products")
+          .select(
+            "id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,status,last_checked_at,last_search_url,reference_price,lower_competitors,last_results,error",
+          )
+          .eq("user_id", userId)
+          .order("created_at", { ascending: true }),
+      ]);
+
+    if (settingError || productError) {
+      setStatus("경쟁가격 추적 데이터를 불러오지 못했습니다. Supabase 마이그레이션 적용 여부를 확인해 주세요.");
+      setTrackingLoaded(true);
+      return;
+    }
+
+    if (setting?.owner_name?.trim()) {
+      setOwnerName(setting.owner_name.trim());
+    }
+
+    setProducts(((rows ?? []) as CompetitorPriceProductRow[]).map(rowToProduct));
+    setStatus("추적 데이터를 불러왔습니다.");
+    setTrackingLoaded(true);
+  }, [userId]);
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(products));
-  }, [products]);
+    void Promise.resolve().then(loadTrackingData);
+  }, [loadTrackingData]);
 
   useEffect(() => {
-    window.localStorage.setItem(OWNER_STORAGE_KEY, ownerName);
-  }, [ownerName]);
+    if (!userId || !trackingLoaded) return;
+
+    const timer = window.setTimeout(() => {
+      void saveOwnerName(userId, ownerName);
+    }, 500);
+
+    return () => window.clearTimeout(timer);
+  }, [userId, ownerName, trackingLoaded]);
 
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -72,25 +134,33 @@ export default function CompetitorPriceChecker() {
 
     try {
       const text = await readFileText(file);
-      importProducts(text);
+      await importProducts(text);
     } catch (error) {
       const message = error instanceof Error ? error.message : "파일을 읽지 못했습니다.";
       setStatus(message);
     }
   }
 
-  function handlePasteImport() {
-    importProducts(pastedCsv);
+  async function handlePasteImport() {
+    await importProducts(pastedCsv);
   }
 
-  function importProducts(text: string) {
+  async function importProducts(text: string) {
+    if (!userId) {
+      setStatus("로그인이 필요합니다.");
+      return;
+    }
+
     const imported = parseProductsFromCsv(text);
     if (!imported.length) {
       setStatus("가져올 상품을 찾지 못했습니다. 헤더와 가격 컬럼을 확인해 주세요.");
       return;
     }
 
-    setProducts((current) => mergeImportedProducts(current, imported));
+    const merged = mergeImportedProducts(products, imported);
+    setProducts(merged);
+    await saveProductList(userId, merged);
+    await loadTrackingData();
     setStatus(`${imported.length.toLocaleString()}개 상품을 동기화했습니다.`);
     setPastedCsv("");
   }
@@ -157,28 +227,69 @@ export default function CompetitorPriceChecker() {
 
   async function checkAllActiveProducts() {
     if (!activeProducts.length) {
-      setStatus("추적중인 상품이 없습니다.");
+      setStatus("추적 중인 상품이 없습니다.");
       return;
     }
 
-    setStatus(`${activeProducts.length.toLocaleString()}개 상품 가격 확인을 시작했습니다.`);
-    for (let index = 0; index < activeProducts.length; index += 1) {
-      const product = activeProducts[index];
-      setStatus(`가격 확인 중 ${index + 1}/${activeProducts.length}: ${product.title || product.buymaProductId}`);
-      await checkProduct(product);
-      if (index < activeProducts.length - 1) await delay(1100);
+    if (!session?.access_token) {
+      setStatus("로그인이 필요합니다.");
+      return;
     }
-    setStatus("가격 확인이 완료되었습니다.");
+
+    setCheckingBatch(true);
+    setStatus(`서버에서 최대 ${BATCH_LIMIT}개 상품의 가격 확인을 시작했습니다.`);
+
+    try {
+      const response = await fetch("/api/buyma/competitor-price-batch", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ limit: BATCH_LIMIT }),
+      });
+      const data = (await response.json()) as
+        | { ok: true; checked: number; failed: number }
+        | { ok: false; error: string };
+
+      if (!response.ok || !data.ok) {
+        setStatus(data.ok ? "가격 확인에 실패했습니다." : data.error);
+        return;
+      }
+
+      await loadTrackingData();
+      setStatus(`${data.checked.toLocaleString()}개 확인 완료, 실패 ${data.failed.toLocaleString()}개입니다.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "가격 확인에 실패했습니다.";
+      setStatus(message);
+    } finally {
+      setCheckingBatch(false);
+    }
   }
 
   function updateProduct(id: string, patch: Partial<TrackedBuymaProduct>) {
+    const currentProduct = products.find((product) => product.id === id);
+    const nextProduct = currentProduct ? { ...currentProduct, ...patch } : null;
+
     setProducts((current) =>
       current.map((product) => (product.id === id ? { ...product, ...patch } : product)),
     );
+
+    if (userId && nextProduct) {
+      void saveProductPatch(userId, id, patch);
+    }
   }
 
   function removeProduct(id: string) {
     setProducts((current) => current.filter((product) => product.id !== id));
+
+    if (userId) {
+      void supabase
+        .from("competitor_price_products")
+        .delete()
+        .eq("user_id", userId)
+        .eq("id", id);
+    }
   }
 
   function downloadSampleCsv() {
@@ -211,7 +322,7 @@ export default function CompetitorPriceChecker() {
               </label>
               <button
                 type="button"
-                onClick={handlePasteImport}
+                onClick={() => void handlePasteImport()}
                 className="inline-flex min-h-11 items-center justify-center rounded-lg border border-black/15 bg-white px-4 text-sm font-extrabold text-[#151515] transition hover:border-black/30"
               >
                 붙여넣기 반영
@@ -244,19 +355,22 @@ export default function CompetitorPriceChecker() {
             </label>
             <button
               type="button"
-              disabled={!activeProducts.length || checkingIds.size > 0}
+              disabled={!activeProducts.length || checkingBatch || checkingIds.size > 0}
               onClick={() => void checkAllActiveProducts()}
               className="inline-flex min-h-11 items-center justify-center rounded-lg bg-[#2d73ff] px-4 text-sm font-extrabold text-white transition hover:bg-[#1e5ed8] disabled:cursor-not-allowed disabled:opacity-60"
             >
-              전체 가격 확인
+              {checkingBatch ? "확인 중" : "서버 가격 확인"}
             </button>
+            <p className="text-xs font-bold leading-5 text-[#6c655b]">
+              무료 플랜 안정성을 위해 한 번에 최대 {BATCH_LIMIT}개씩 확인합니다.
+            </p>
           </div>
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2 text-xs font-extrabold text-[#6c655b]">
           <span className="rounded-full bg-[#f1eee6] px-3 py-1.5">전체 {products.length.toLocaleString()}</span>
           <span className="rounded-full bg-[#f1eee6] px-3 py-1.5">추적중 {activeProducts.length.toLocaleString()}</span>
-          <span className="rounded-full bg-[#fff1e6] px-3 py-1.5 text-[#b95600]">낮은 가격 {alertProducts.length.toLocaleString()}</span>
+          <span className="rounded-full bg-[#fff1e6] px-3 py-1.5 text-[#b95600]">더 낮은 가격 {alertProducts.length.toLocaleString()}</span>
           <span className="rounded-full bg-[#eef3ff] px-3 py-1.5 text-[#2d73ff]">확인완료 {checkedProducts.length.toLocaleString()}</span>
         </div>
         <p className="mt-3 text-sm font-bold text-[#6c655b]">{status}</p>
@@ -338,7 +452,7 @@ export default function CompetitorPriceChecker() {
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
-                            disabled={isChecking}
+                            disabled={isChecking || checkingBatch}
                             onClick={() => void checkProduct(product)}
                             className="inline-flex min-h-9 items-center justify-center rounded-lg border border-black/15 bg-white px-3 text-xs font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-60"
                           >
@@ -371,15 +485,107 @@ export default function CompetitorPriceChecker() {
   );
 }
 
-function loadStoredProducts() {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as TrackedBuymaProduct[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+async function saveOwnerName(userId: string, ownerName: string) {
+  await supabase
+    .from("competitor_price_settings")
+    .upsert(
+      {
+        user_id: userId,
+        owner_name: ownerName.trim() || DEFAULT_OWNER_NAME,
+      },
+      { onConflict: "user_id" },
+    );
+}
+
+async function saveProductList(userId: string, products: TrackedBuymaProduct[]) {
+  const rows = products.map((product) => productToUpsertRow(userId, product));
+  const { error } = await supabase
+    .from("competitor_price_products")
+    .upsert(rows, { onConflict: "user_id,merge_key" });
+
+  if (error) {
+    throw error;
   }
+}
+
+async function saveProductPatch(
+  userId: string,
+  productId: string,
+  patch: Partial<TrackedBuymaProduct>,
+) {
+  const rowPatch = productPatchToRowPatch(patch);
+  if (!Object.keys(rowPatch).length) return;
+
+  await supabase
+    .from("competitor_price_products")
+    .update(rowPatch)
+    .eq("user_id", userId)
+    .eq("id", productId);
+}
+
+function rowToProduct(row: CompetitorPriceProductRow): TrackedBuymaProduct {
+  return {
+    id: row.id,
+    buymaProductId: row.buyma_product_id ?? "",
+    buymaUrl: row.buyma_url ?? "",
+    title: row.title ?? "",
+    brand: row.brand ?? "",
+    modelNumber: row.model_number ?? "",
+    ownPrice: row.own_price ?? 0,
+    searchKeyword: row.search_keyword ?? "",
+    searchUrl: row.search_url ?? "",
+    status: row.status,
+    lastCheckedAt: row.last_checked_at ?? undefined,
+    lastSearchUrl: row.last_search_url ?? undefined,
+    referencePrice: row.reference_price ?? undefined,
+    lowerCompetitors: toCompetitorItems(row.lower_competitors),
+    lastResults: toCompetitorItems(row.last_results),
+    error: row.error ?? undefined,
+  };
+}
+
+function productToUpsertRow(userId: string, product: TrackedBuymaProduct) {
+  return {
+    user_id: userId,
+    merge_key: getMergeKey(product) || product.id,
+    buyma_product_id: product.buymaProductId,
+    buyma_url: product.buymaUrl,
+    title: product.title,
+    brand: product.brand,
+    model_number: product.modelNumber,
+    own_price: product.ownPrice,
+    search_keyword: product.searchKeyword,
+    search_url: product.searchUrl,
+    status: product.status,
+    last_checked_at: product.lastCheckedAt ?? null,
+    last_search_url: product.lastSearchUrl ?? null,
+    reference_price: product.referencePrice ?? null,
+    lower_competitors: product.lowerCompetitors ?? [],
+    last_results: product.lastResults ?? [],
+    error: product.error ?? null,
+  };
+}
+
+function productPatchToRowPatch(patch: Partial<TrackedBuymaProduct>) {
+  const row: Record<string, unknown> = {};
+
+  if ("buymaProductId" in patch) row.buyma_product_id = patch.buymaProductId ?? "";
+  if ("buymaUrl" in patch) row.buyma_url = patch.buymaUrl ?? "";
+  if ("title" in patch) row.title = patch.title ?? "";
+  if ("brand" in patch) row.brand = patch.brand ?? "";
+  if ("modelNumber" in patch) row.model_number = patch.modelNumber ?? "";
+  if ("ownPrice" in patch) row.own_price = patch.ownPrice ?? 0;
+  if ("searchKeyword" in patch) row.search_keyword = patch.searchKeyword ?? "";
+  if ("searchUrl" in patch) row.search_url = patch.searchUrl ?? "";
+  if ("status" in patch) row.status = patch.status ?? "active";
+  if ("lastCheckedAt" in patch) row.last_checked_at = patch.lastCheckedAt ?? null;
+  if ("lastSearchUrl" in patch) row.last_search_url = patch.lastSearchUrl ?? null;
+  if ("referencePrice" in patch) row.reference_price = patch.referencePrice ?? null;
+  if ("lowerCompetitors" in patch) row.lower_competitors = patch.lowerCompetitors ?? [];
+  if ("lastResults" in patch) row.last_results = patch.lastResults ?? [];
+  if ("error" in patch) row.error = patch.error ?? null;
+
+  return row;
 }
 
 async function readFileText(file: File) {
@@ -482,21 +688,22 @@ function detectDelimiter(text: string) {
 
 function normalizeHeader(value: string) {
   const normalized = value.trim().toLowerCase().replace(/[\s_()[\]{}]/g, "");
-  if (["buymaproductid", "productid", "itemid", "상품번호", "상품id", "商品id"].includes(normalized)) return "buymaProductId";
-  if (["buymaurl", "url", "itemurl", "상품url", "商品url"].includes(normalized)) return "buymaUrl";
-  if (["title", "productname", "name", "상품명", "商品名"].includes(normalized)) return "title";
-  if (["brand", "브랜드", "ブランド"].includes(normalized)) return "brand";
-  if (["modelnumber", "model", "모델번호", "品番", "型番"].includes(normalized)) return "modelNumber";
-  if (["ownprice", "price", "sellingprice", "판매가", "가격", "出品価格", "価格"].includes(normalized)) return "ownPrice";
+
+  if (["buymaproductid", "productid", "itemid", "상품번호", "상품id", "아이템id"].includes(normalized)) return "buymaProductId";
+  if (["buymaurl", "url", "itemurl", "상품url", "아이템url"].includes(normalized)) return "buymaUrl";
+  if (["title", "productname", "name", "상품명", "아이템명"].includes(normalized)) return "title";
+  if (["brand", "브랜드"].includes(normalized)) return "brand";
+  if (["modelnumber", "model", "모델번호", "품번", "모델"].includes(normalized)) return "modelNumber";
+  if (["ownprice", "price", "sellingprice", "판매가", "가격"].includes(normalized)) return "ownPrice";
   if (["searchkeyword", "keyword", "검색어"].includes(normalized)) return "searchKeyword";
   if (["searchurl", "검색url"].includes(normalized)) return "searchUrl";
-  if (normalized.includes("商品id") || normalized.includes("商品番号")) return "buymaProductId";
   if (normalized.includes("url")) return normalized.includes("search") || normalized.includes("검색") ? "searchUrl" : "buymaUrl";
-  if (normalized.includes("商品名") || normalized.includes("상품명")) return "title";
-  if (normalized.includes("ブランド") || normalized.includes("브랜드")) return "brand";
-  if (normalized.includes("品番") || normalized.includes("型番") || normalized.includes("모델")) return "modelNumber";
-  if (normalized.includes("価格") || normalized.includes("price") || normalized.includes("가격") || normalized.includes("판매가")) return "ownPrice";
+  if (normalized.includes("상품명") || normalized.includes("아이템명")) return "title";
+  if (normalized.includes("브랜드")) return "brand";
+  if (normalized.includes("품번") || normalized.includes("모델")) return "modelNumber";
+  if (normalized.includes("price") || normalized.includes("가격") || normalized.includes("판매가")) return "ownPrice";
   if (normalized.includes("keyword") || normalized.includes("검색어")) return "searchKeyword";
+
   return normalized;
 }
 
@@ -555,6 +762,21 @@ function buildDefaultKeyword(brand: string, modelNumber: string, title: string) 
   return [brand, modelNumber].filter(Boolean).join(" ") || title;
 }
 
+function toCompetitorItems(value: unknown): BuymaCompetitorPriceItem[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.filter((item): item is BuymaCompetitorPriceItem => {
+    if (!item || typeof item !== "object") return false;
+
+    const candidate = item as BuymaCompetitorPriceItem;
+    return (
+      typeof candidate.title === "string" &&
+      typeof candidate.price === "number" &&
+      typeof candidate.shopper === "string"
+    );
+  });
+}
+
 function formatYen(value: number | undefined) {
   if (!value) return "-";
   return `¥${value.toLocaleString("ja-JP")}`;
@@ -564,10 +786,4 @@ function formatDateTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
 }

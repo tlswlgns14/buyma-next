@@ -44,7 +44,7 @@ import {
 } from "@/lib/buyma/text";
 
 type ToolTab = "edit" | "editor" | "settings";
-type EditorTemplate = "basic" | "lucky";
+type EditorTemplate = "basic" | "lucky" | "northface" | "northfaceWhiteLabel";
 type CsvTableKey = "items" | "colorSizes";
 type CsvCellEdits = Record<string, string>;
 type EditorPlacedImage = {
@@ -666,16 +666,20 @@ function BasicInfoPanel({
   }
 
   function addBrandLogoImage() {
-    const logo = product?.brandLogo?.trim();
-    if (!logo) {
+    const logos = Array.from(
+      new Set([...(product?.brandLogos ?? []), product?.brandLogo ?? ""].map((logo) => logo.trim()).filter(Boolean)),
+    );
+    if (!logos.length) {
       window.alert("가져올 제품 로고 이미지가 없습니다.");
       return;
     }
-    if (images.includes(logo)) {
-      setSelectedImageIndex(images.indexOf(logo));
+    const firstExistingIndex = images.findIndex((image) => logos.includes(image));
+    const newLogos = logos.filter((logo) => !images.includes(logo));
+    if (!newLogos.length) {
+      if (firstExistingIndex >= 0) setSelectedImageIndex(firstExistingIndex);
       return;
     }
-    updateImages([...images, logo]);
+    updateImages([...images, ...newLogos]);
     setSelectedImageIndex(images.length);
   }
 
@@ -845,7 +849,7 @@ function BasicInfoPanel({
           onAdd={() => addImageInputRef.current?.click()}
           onAddLogo={addBrandLogoImage}
           onOpenManager={() => setIsImageManagerOpen(true)}
-          hasLogo={Boolean(product?.brandLogo)}
+          hasLogo={Boolean(product?.brandLogo || product?.brandLogos?.length)}
           disabled={!product}
         />
         <input
@@ -1302,13 +1306,24 @@ function ImageEditorPanel({
 
   useEffect(() => {
     const brandText = getEnglishBrandName(product);
-    setLogoImage(product?.brandLogo || "");
-    setUploadedPlacedSources([]);
-    setPlacedImages([]);
-    setSelectedPlacedIndex(0);
-    setTitleText(brandText);
-    setShowLogo(false);
-    setShowText(false);
+    const brandLogo = getProductBrandLogo(product);
+    let ignore = false;
+
+    void Promise.resolve().then(() => {
+      if (ignore) return;
+
+      setLogoImage(brandLogo);
+      setUploadedPlacedSources([]);
+      setPlacedImages([]);
+      setSelectedPlacedIndex(0);
+      setTitleText(brandText);
+      setShowLogo(false);
+      setShowText(false);
+    });
+
+    return () => {
+      ignore = true;
+    };
   }, [product]);
 
   useEffect(() => {
@@ -1335,6 +1350,10 @@ function ImageEditorPanel({
 
     if (template === "lucky") {
       renderLuckyTemplate(ctx);
+    } else if (template === "northface") {
+      renderNorthFaceTemplate(ctx);
+    } else if (template === "northfaceWhiteLabel") {
+      renderNorthFaceWhiteLabelTemplate(ctx);
     }
 
     placedLoaded.forEach(({ placed, image }) => {
@@ -1365,6 +1384,7 @@ function ImageEditorPanel({
   const availablePlacedSources = useMemo(
     () => uniqueTextList([
       ...(product?.images ?? []),
+      ...(product?.brandLogos ?? []),
       product?.brandLogo || "",
       ...uploadedPlacedSources,
     ]),
@@ -1614,6 +1634,8 @@ function ImageEditorPanel({
             {[
               ["basic", "기본형"],
               ["lucky", "럭키 배치"],
+              ["northface", "노스페이스"],
+              ["northfaceWhiteLabel", "노스페이스 화이트라벨"],
             ].map(([value, label]) => (
               <button key={value} className={`buyma-editor-tpl-btn ${template === value ? "active" : ""}`} onClick={() => selectTemplate(value as EditorTemplate)}>
                 {label}
@@ -2519,6 +2541,10 @@ async function uploadBase64ToImgbb(base64Data: string, apiKey: string, imageName
 
 async function ensureEnglishProductTitle(product: ProductDraft, prefix = ""): Promise<ProductDraft> {
   const existingEnglish = cleanText(product.titleEn);
+  if (product.site === "thenorthfacekorea.co.kr" && existingEnglish) {
+    return { ...product, title: formatCollectedTitleWithBrand(product, existingEnglish, prefix), titleEn: existingEnglish };
+  }
+
   const sourceTitle = cleanText(product.titleKo || product.title);
   if (!sourceTitle) return product;
 
@@ -2539,10 +2565,12 @@ function formatCollectedTitleWithBrand(product: ProductDraft, title: string, pre
   const brand = resolveProductTitleBrand(product, sourceTitle);
   const colors = resolveProductTitleColors(product);
   const cleanedTitle = removeProductTitleNoise(sourceTitle);
-  const productName =
+  const rawProductName =
     stripTitlePrefix(stripTrailingColor(stripBrandFromTitle(cleanedTitle, brand), colors), titlePrefix) ||
     stripTitlePrefix(cleanedTitle, titlePrefix) ||
     "Fashion Item";
+  const productName =
+    product.site === "thenorthfacekorea.co.kr" ? appendProductCodeToTitle(rawProductName, product.productCode) : rawProductName;
   const colorSuffix = colors.length > 1 ? `(${colors.length}colors)` : colors[0] ? `(${colors[0]})` : "";
 
   return joinTitleParts(brand ? `【${brand}】` : "", titlePrefix, productName, colorSuffix);
@@ -3028,13 +3056,22 @@ function buildCollectedProductTitle(product: ProductDraft, colors: string[], pre
   const brand = resolveProductTitleBrand(product, sourceTitle);
   const bracketedBrand = brand ? `【${brand}】` : "";
   const cleanedTitle = removeProductTitleNoise(sourceTitle);
-  const productName =
+  const rawProductName =
     stripTitlePrefix(stripTrailingColor(stripBrandFromTitle(cleanedTitle, brand), colors), titlePrefix) ||
     stripTitlePrefix(cleanedTitle, titlePrefix) ||
     "Fashion Item";
+  const productName =
+    product.site === "thenorthfacekorea.co.kr" ? appendProductCodeToTitle(rawProductName, product.productCode) : rawProductName;
   const colorSuffix = colors.length > 1 ? `(${colors.length}colors)` : colors[0] ? `(${colors[0]})` : "";
 
   return joinTitleParts(bracketedBrand, titlePrefix, productName, colorSuffix);
+}
+
+function appendProductCodeToTitle(title: string, productCode: unknown) {
+  const code = cleanText(productCode).toUpperCase();
+  const sourceTitle = normalizeTitlePart(title);
+  if (!sourceTitle || !code) return sourceTitle;
+  return new RegExp(`(^|\\s)${escapeRegExp(code)}($|\\s)`, "i").test(sourceTitle) ? sourceTitle : `${sourceTitle} ${code}`;
 }
 
 function resolveProductTitleBrand(product: ProductDraft, sourceTitle: string) {
@@ -3159,6 +3196,10 @@ function getEnglishBrandName(product: ProductDraft | null) {
     product.brandDisplayName?.replace(/\(.+\)$/, ""),
   ];
   return normalizeTitlePart(candidates.find((candidate) => hasLatinText(cleanText(candidate))) || "");
+}
+
+function getProductBrandLogo(product: ProductDraft | null) {
+  return cleanText(product?.brandLogo || product?.brandLogos?.[0] || "");
 }
 
 function drawEditorText(
@@ -3353,11 +3394,16 @@ async function translateMultilineText(text: string, target: "en" | "ja") {
   const translatedLines = await Promise.all(
     lines.map(async (line) => {
       const trimmed = cleanText(line);
+      if (target === "ja" && isStandaloneSizeLine(trimmed)) return trimmed;
       return trimmed ? translateText(trimmed, target) : "";
     }),
   );
 
   return translatedLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function isStandaloneSizeLine(value: string) {
+  return /^(?:FREE|ONE|ONE\s*SIZE|OS|XS|S|M|L|XL|XXL|XXXL|\d+\([A-Z0-9]+\)|\d{1,3}|[A-Z0-9./+-]{1,12})$/i.test(value);
 }
 
 async function readFile(file: File) {
@@ -3435,6 +3481,31 @@ function renderLuckyTemplate(ctx: CanvasRenderingContext2D) {
   const headerHeight = 112;
   const leftWidth = 330;
 
+  ctx.strokeStyle = "#111";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, 798, 798);
+  ctx.beginPath();
+  ctx.moveTo(0, headerHeight);
+  ctx.lineTo(800, headerHeight);
+  ctx.moveTo(leftWidth, headerHeight);
+  ctx.lineTo(leftWidth, 800);
+  ctx.stroke();
+}
+
+function renderNorthFaceTemplate(ctx: CanvasRenderingContext2D) {
+  renderNorthFaceBaseTemplate(ctx, "#1B1B1B");
+}
+
+function renderNorthFaceWhiteLabelTemplate(ctx: CanvasRenderingContext2D) {
+  renderNorthFaceBaseTemplate(ctx, "#F6F6F6");
+}
+
+function renderNorthFaceBaseTemplate(ctx: CanvasRenderingContext2D, headerColor: string) {
+  const headerHeight = 112;
+  const leftWidth = 330;
+
+  ctx.fillStyle = headerColor;
+  ctx.fillRect(0, 0, 800, headerHeight);
   ctx.strokeStyle = "#111";
   ctx.lineWidth = 2;
   ctx.strokeRect(1, 1, 798, 798);

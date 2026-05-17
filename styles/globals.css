@@ -716,7 +716,14 @@ a {
   overflow: hidden;
   border: 1px solid #ddd;
   border-radius: 5px;
-  background: #f8fafc;
+  background:
+    linear-gradient(45deg, #d8dee8 25%, transparent 25%),
+    linear-gradient(-45deg, #d8dee8 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #d8dee8 75%),
+    linear-gradient(-45deg, transparent 75%, #d8dee8 75%);
+  background-color: #ffffff;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
 }
 
 .buyma-image-preview img {
@@ -1120,7 +1127,14 @@ a {
   overflow: hidden;
   border: 1px solid #d7dce7;
   border-radius: 4px;
-  background: #fff;
+  background:
+    linear-gradient(45deg, #d8dee8 25%, transparent 25%),
+    linear-gradient(-45deg, #d8dee8 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #d8dee8 75%),
+    linear-gradient(-45deg, transparent 75%, #d8dee8 75%);
+  background-color: #ffffff;
+  background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+  background-size: 12px 12px;
   cursor: pointer;
   padding: 2px;
 }

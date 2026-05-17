@@ -379,12 +379,21 @@ function normalizeBuymaTitle(product: ProductDraft, prefix = "") {
   const colors = resolveTitleColors(product);
   const colorSuffix = colors.length > 1 ? `(${colors.length}colors)` : colors[0] ? `(${colors[0]})` : "";
   const strippedTitle = stripBrandFromTitle(source, brand);
-  const productName =
+  const rawProductName =
     stripTitlePrefix(stripTrailingColor(strippedTitle, colors), titlePrefix) ||
     stripTitlePrefix(strippedTitle, titlePrefix) ||
     "Fashion Item";
+  const productName =
+    product.site === "thenorthfacekorea.co.kr" ? appendProductCodeToTitle(rawProductName, product.productCode) : rawProductName;
 
   return joinTitleParts(bracketedBrand, titlePrefix, productName, colorSuffix);
+}
+
+function appendProductCodeToTitle(title: string, productCode: unknown) {
+  const code = cleanText(productCode).toUpperCase();
+  const sourceTitle = normalizeTitlePart(title);
+  if (!sourceTitle || !code) return sourceTitle;
+  return new RegExp(`(^|\\s)${escapeRegExp(code)}($|\\s)`, "i").test(sourceTitle) ? sourceTitle : `${sourceTitle} ${code}`;
 }
 
 function truncateBuymaTitle(title: string) {
