@@ -10,6 +10,7 @@ import {
 import { supabase } from "@/lib/supabase";
 
 type TrackedStatus = "active" | "paused" | "missing" | "ended";
+type SortMode = "action" | "csv" | "csvReverse" | "recent" | "unchecked" | "oldestChecked" | "title";
 
 type TrackedBuymaProduct = {
   id: string;
@@ -28,6 +29,9 @@ type TrackedBuymaProduct = {
   lowerCompetitors?: BuymaCompetitorPriceItem[];
   lastResults?: BuymaCompetitorPriceItem[];
   error?: string;
+  createdAt?: string;
+  csvOrder?: number;
+  csvImportedAt?: string;
 };
 
 type CompetitorPriceProductRow = {
@@ -48,10 +52,17 @@ type CompetitorPriceProductRow = {
   lower_competitors: unknown;
   last_results: unknown;
   error: string | null;
+  created_at: string | null;
+  csv_order: number | null;
+  csv_imported_at: string | null;
 };
 
 const DEFAULT_OWNER_NAME = "sonokoro";
 const BATCH_LIMIT = 50;
+const PRODUCT_SELECT_COLUMNS =
+  "id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,status,last_checked_at,last_search_url,reference_price,lower_competitors,last_results,error,created_at,csv_order,csv_imported_at";
+const PRODUCT_SELECT_COLUMNS_LEGACY =
+  "id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,status,last_checked_at,last_search_url,reference_price,lower_competitors,last_results,error,created_at";
 
 export default function CompetitorPriceChecker() {
   const { authUser, session } = useAuth();
@@ -63,6 +74,7 @@ export default function CompetitorPriceChecker() {
   const [checkingIds, setCheckingIds] = useState<Set<string>>(() => new Set());
   const [checkingBatch, setCheckingBatch] = useState(false);
   const [trackingLoaded, setTrackingLoaded] = useState(false);
+  const [sortMode, setSortMode] = useState<SortMode>("action");
 
   const activeProducts = useMemo(
     () => products.filter((product) => product.status === "active"),
@@ -76,27 +88,26 @@ export default function CompetitorPriceChecker() {
     () => products.filter((product) => product.lastCheckedAt),
     [products],
   );
+  const sortedProducts = useMemo(
+    () => sortTrackedProducts(products, sortMode),
+    [products, sortMode],
+  );
 
   const loadTrackingData = useCallback(async () => {
     if (!userId) return;
 
     setTrackingLoaded(false);
 
-    const [{ data: setting, error: settingError }, { data: rows, error: productError }] =
+    const [{ data: setting, error: settingError }, productResult] =
       await Promise.all([
         supabase
           .from("competitor_price_settings")
           .select("owner_name")
           .eq("user_id", userId)
           .maybeSingle(),
-        supabase
-          .from("competitor_price_products")
-          .select(
-            "id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,status,last_checked_at,last_search_url,reference_price,lower_competitors,last_results,error",
-          )
-          .eq("user_id", userId)
-          .order("created_at", { ascending: true }),
+        loadProductRows(userId),
       ]);
+    const { rows, error: productError } = productResult;
 
     if (settingError || productError) {
       setStatus("경쟁가격 추적 데이터를 불러오지 못했습니다. Supabase 마이그레이션 적용 여부를 확인해 주세요.");
@@ -157,7 +168,13 @@ export default function CompetitorPriceChecker() {
       return;
     }
 
-    const merged = mergeImportedProducts(products, imported);
+    const csvImportedAt = new Date().toISOString();
+    const orderedImported = imported.map((product, index) => ({
+      ...product,
+      csvOrder: index + 1,
+      csvImportedAt,
+    }));
+    const merged = mergeImportedProducts(products, orderedImported);
     setProducts(merged);
     await saveProductList(userId, merged);
     await loadTrackingData();
@@ -292,6 +309,29 @@ export default function CompetitorPriceChecker() {
     }
   }
 
+  async function removeAllProducts() {
+    if (!userId || !products.length) return;
+    const confirmed = window.confirm("현재 계정의 경쟁가격 추적 상품을 모두 삭제할까요? 이 작업은 되돌릴 수 없습니다.");
+    if (!confirmed) return;
+
+    const previousProducts = products;
+    setProducts([]);
+    setStatus("전체 삭제 중입니다.");
+
+    const { error } = await supabase
+      .from("competitor_price_products")
+      .delete()
+      .eq("user_id", userId);
+
+    if (error) {
+      setProducts(previousProducts);
+      setStatus(`전체 삭제에 실패했습니다: ${error.message}`);
+      return;
+    }
+
+    setStatus("경쟁가격 추적 상품을 모두 삭제했습니다.");
+  }
+
   function downloadSampleCsv() {
     const content = [
       "商品ID,商品名,ブランド名,単価,ブランド品番1,検索キーワード,検索URL",
@@ -374,6 +414,33 @@ export default function CompetitorPriceChecker() {
           <span className="rounded-full bg-[#fff1e6] px-3 py-1.5 text-[#b95600]">더 낮은 가격 {alertProducts.length.toLocaleString()}</span>
           <span className="rounded-full bg-[#eef3ff] px-3 py-1.5 text-[#2d73ff]">확인완료 {checkedProducts.length.toLocaleString()}</span>
         </div>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-sort-mode">
+            정렬
+          </label>
+          <select
+            id="competitor-sort-mode"
+            value={sortMode}
+            onChange={(event) => setSortMode(event.target.value as SortMode)}
+            className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+          >
+            <option value="action">조치 필요순</option>
+            <option value="csv">CSV 순서</option>
+            <option value="csvReverse">CSV 역순</option>
+            <option value="unchecked">미확인 우선</option>
+            <option value="oldestChecked">오래된 확인순</option>
+            <option value="recent">최근 등록순</option>
+            <option value="title">상품명순</option>
+          </select>
+          <button
+            type="button"
+            disabled={!products.length || checkingBatch}
+            onClick={() => void removeAllProducts()}
+            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#c43b2f]/25 bg-white px-3 text-sm font-extrabold text-[#c43b2f] transition hover:border-[#c43b2f] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            전체삭제
+          </button>
+        </div>
         <p className="mt-3 text-sm font-bold text-[#6c655b]">{status}</p>
       </section>
 
@@ -392,9 +459,9 @@ export default function CompetitorPriceChecker() {
               </tr>
             </thead>
             <tbody>
-              {products.length ? (
-                products.map((product) => {
-                  const lowerCompetitor = product.lowerCompetitors?.[0];
+              {sortedProducts.length ? (
+                sortedProducts.map((product) => {
+                  const priceStatus = getPriceStatus(product);
                   const isChecking = checkingIds.has(product.id);
 
                   return (
@@ -424,13 +491,19 @@ export default function CompetitorPriceChecker() {
                         {formatYen(product.referencePrice || product.ownPrice)}
                       </td>
                       <td className="px-4 py-4">
-                        {lowerCompetitor ? (
+                        {priceStatus.kind === "lower" ? (
                           <div>
-                            <div className="font-extrabold text-[#c43b2f]">{formatYen(lowerCompetitor.price)}</div>
-                            <div className="mt-1 text-xs font-bold text-[#6c655b]">{lowerCompetitor.shopper}</div>
+                            <div className="font-extrabold text-[#c43b2f]">{formatYen(priceStatus.lowerCompetitor.price)}</div>
+                            <div className="mt-1 text-xs font-bold text-[#6c655b]">{priceStatus.lowerCompetitor.shopper}</div>
                           </div>
+                        ) : priceStatus.kind === "ok" ? (
+                          <StatusPill tone="ok" label="낮은 가격 없음" />
+                        ) : priceStatus.kind === "unchecked" ? (
+                          <StatusPill tone="muted" label="미확인" />
+                        ) : priceStatus.kind === "empty" ? (
+                          <StatusPill tone="warning" label="검색결과 없음" />
                         ) : (
-                          <span className="font-bold text-[#6c655b]">-</span>
+                          <StatusPill tone="danger" label="오류" />
                         )}
                       </td>
                       <td className="max-w-[280px] px-4 py-4">
@@ -498,6 +571,29 @@ async function saveOwnerName(userId: string, ownerName: string) {
     );
 }
 
+async function loadProductRows(userId: string) {
+  const result = await supabase
+    .from("competitor_price_products")
+    .select(PRODUCT_SELECT_COLUMNS)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true });
+
+  if (!result.error) {
+    return { rows: result.data ?? [], error: null };
+  }
+
+  const fallback = await supabase
+    .from("competitor_price_products")
+    .select(PRODUCT_SELECT_COLUMNS_LEGACY)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true });
+
+  return {
+    rows: fallback.data ?? [],
+    error: fallback.error,
+  };
+}
+
 async function saveProductList(userId: string, products: TrackedBuymaProduct[]) {
   const rows = products.map((product) => productToUpsertRow(userId, product));
   const { error } = await supabase
@@ -542,6 +638,9 @@ function rowToProduct(row: CompetitorPriceProductRow): TrackedBuymaProduct {
     lowerCompetitors: toCompetitorItems(row.lower_competitors),
     lastResults: toCompetitorItems(row.last_results),
     error: row.error ?? undefined,
+    createdAt: row.created_at ?? undefined,
+    csvOrder: row.csv_order ?? undefined,
+    csvImportedAt: row.csv_imported_at ?? undefined,
   };
 }
 
@@ -564,6 +663,8 @@ function productToUpsertRow(userId: string, product: TrackedBuymaProduct) {
     lower_competitors: product.lowerCompetitors ?? [],
     last_results: product.lastResults ?? [],
     error: product.error ?? null,
+    csv_order: product.csvOrder ?? null,
+    csv_imported_at: product.csvImportedAt ?? null,
   };
 }
 
@@ -587,6 +688,120 @@ function productPatchToRowPatch(patch: Partial<TrackedBuymaProduct>) {
   if ("error" in patch) row.error = patch.error ?? null;
 
   return row;
+}
+
+function sortTrackedProducts(products: TrackedBuymaProduct[], sortMode: SortMode) {
+  return [...products].sort((a, b) => {
+    switch (sortMode) {
+      case "csv":
+        return compareDateDesc(a.csvImportedAt, b.csvImportedAt) || compareNumberAsc(a.csvOrder, b.csvOrder) || compareTitle(a, b);
+      case "csvReverse":
+        return compareDateDesc(a.csvImportedAt, b.csvImportedAt) || compareNumberDesc(a.csvOrder, b.csvOrder) || compareTitle(a, b);
+      case "recent":
+        return compareDateDesc(a.createdAt, b.createdAt) || compareTitle(a, b);
+      case "unchecked":
+        return compareUnchecked(a, b) || compareDateDesc(a.createdAt, b.createdAt) || compareTitle(a, b);
+      case "oldestChecked":
+        return compareCheckedAtAsc(a, b) || compareDateDesc(a.createdAt, b.createdAt) || compareTitle(a, b);
+      case "title":
+        return compareTitle(a, b);
+      case "action":
+      default:
+        return (
+          compareLowerCompetitors(a, b) ||
+          compareStatus(a, b) ||
+          compareUnchecked(a, b) ||
+          compareCheckedAtAsc(a, b) ||
+          compareDateDesc(a.createdAt, b.createdAt) ||
+          compareTitle(a, b)
+        );
+    }
+  });
+}
+
+function compareLowerCompetitors(a: TrackedBuymaProduct, b: TrackedBuymaProduct) {
+  return Number(Boolean(b.lowerCompetitors?.length)) - Number(Boolean(a.lowerCompetitors?.length));
+}
+
+function compareStatus(a: TrackedBuymaProduct, b: TrackedBuymaProduct) {
+  const rank: Record<TrackedStatus, number> = {
+    active: 0,
+    missing: 1,
+    paused: 2,
+    ended: 3,
+  };
+
+  return rank[a.status] - rank[b.status];
+}
+
+function compareUnchecked(a: TrackedBuymaProduct, b: TrackedBuymaProduct) {
+  return Number(Boolean(a.lastCheckedAt)) - Number(Boolean(b.lastCheckedAt));
+}
+
+function compareCheckedAtAsc(a: TrackedBuymaProduct, b: TrackedBuymaProduct) {
+  return getTime(a.lastCheckedAt) - getTime(b.lastCheckedAt);
+}
+
+function compareDateDesc(a: string | undefined, b: string | undefined) {
+  return getTime(b) - getTime(a);
+}
+
+function compareNumberAsc(a: number | undefined, b: number | undefined) {
+  return (a ?? Number.MAX_SAFE_INTEGER) - (b ?? Number.MAX_SAFE_INTEGER);
+}
+
+function compareNumberDesc(a: number | undefined, b: number | undefined) {
+  return (b ?? Number.MIN_SAFE_INTEGER) - (a ?? Number.MIN_SAFE_INTEGER);
+}
+
+function compareTitle(a: TrackedBuymaProduct, b: TrackedBuymaProduct) {
+  return (a.title || a.buymaProductId).localeCompare(b.title || b.buymaProductId, "ko");
+}
+
+function getTime(value: string | undefined) {
+  if (!value) return 0;
+
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+type PriceStatus =
+  | { kind: "lower"; lowerCompetitor: BuymaCompetitorPriceItem }
+  | { kind: "ok" }
+  | { kind: "unchecked" }
+  | { kind: "empty" }
+  | { kind: "error" };
+
+function getPriceStatus(product: TrackedBuymaProduct): PriceStatus {
+  const lowerCompetitor = product.lowerCompetitors?.[0];
+  if (lowerCompetitor) return { kind: "lower", lowerCompetitor };
+  if (!product.lastCheckedAt) return { kind: "unchecked" };
+  if (product.error) {
+    return product.lastResults?.length === 0 ? { kind: "empty" } : { kind: "error" };
+  }
+
+  return { kind: "ok" };
+}
+
+function StatusPill({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "ok" | "muted" | "warning" | "danger";
+}) {
+  const classNameByTone = {
+    ok: "border-[#2f9d62]/20 bg-[#ecf8f0] text-[#24784c]",
+    muted: "border-black/10 bg-[#f1eee6] text-[#6c655b]",
+    warning: "border-[#d78b1f]/20 bg-[#fff6e8] text-[#9a5c00]",
+    danger: "border-[#c43b2f]/20 bg-[#fff0ee] text-[#c43b2f]",
+  };
+
+  return (
+    <span className={`inline-flex min-h-7 items-center rounded-full border px-2.5 text-xs font-extrabold ${classNameByTone[tone]}`}>
+      {label}
+    </span>
+  );
 }
 
 async function readFileText(file: File) {
