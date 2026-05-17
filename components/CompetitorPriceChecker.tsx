@@ -11,7 +11,7 @@ import { supabase } from "@/lib/supabase";
 
 type TrackedStatus = "active" | "paused" | "missing" | "ended";
 type SortMode = "action" | "csv" | "csvReverse" | "recent" | "unchecked" | "oldestChecked" | "title";
-type ProductFilterMode = "all" | "unchecked";
+type ProductFilterMode = "all" | "unchecked" | "checked";
 
 type TrackedBuymaProduct = {
   id: string;
@@ -577,6 +577,7 @@ export default function CompetitorPriceChecker() {
           >
             <option value="all">전체보기</option>
             <option value="unchecked">미확인만 보기</option>
+            <option value="checked">확인만 보기</option>
           </select>
           <button
             type="button"
@@ -906,6 +907,10 @@ function productPatchToRowPatch(patch: Partial<TrackedBuymaProduct>) {
 function filterTrackedProducts(products: TrackedBuymaProduct[], filterMode: ProductFilterMode) {
   if (filterMode === "unchecked") {
     return products.filter((product) => !product.lastCheckedAt);
+  }
+
+  if (filterMode === "checked") {
+    return products.filter((product) => product.lastCheckedAt);
   }
 
   return products;
