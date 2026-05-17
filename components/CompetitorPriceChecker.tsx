@@ -11,6 +11,7 @@ import { supabase } from "@/lib/supabase";
 
 type TrackedStatus = "active" | "paused" | "missing" | "ended";
 type SortMode = "action" | "csv" | "csvReverse" | "recent" | "unchecked" | "oldestChecked" | "title";
+type ProductFilterMode = "all" | "unchecked";
 
 type TrackedBuymaProduct = {
   id: string;
@@ -59,6 +60,7 @@ type CompetitorPriceProductRow = {
 
 const DEFAULT_OWNER_NAME = "sonokoro";
 const BATCH_LIMIT = 50;
+const PAGE_SIZE_OPTIONS = [10, 30, 50, 100, 500] as const;
 const PRODUCT_SELECT_COLUMNS =
   "id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,status,last_checked_at,last_search_url,reference_price,lower_competitors,last_results,error,created_at,csv_order,csv_imported_at";
 const PRODUCT_SELECT_COLUMNS_LEGACY =
@@ -74,7 +76,11 @@ export default function CompetitorPriceChecker() {
   const [checkingIds, setCheckingIds] = useState<Set<string>>(() => new Set());
   const [checkingBatch, setCheckingBatch] = useState(false);
   const [trackingLoaded, setTrackingLoaded] = useState(false);
-  const [sortMode, setSortMode] = useState<SortMode>("action");
+  const [sortMode, setSortMode] = useState<SortMode>("csvReverse");
+  const [pageSize, setPageSize] = useState<number>(50);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [filterMode, setFilterMode] = useState<ProductFilterMode>("all");
+  const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(() => new Set());
 
   const activeProducts = useMemo(
     () => products.filter((product) => product.status === "active"),
@@ -88,10 +94,28 @@ export default function CompetitorPriceChecker() {
     () => products.filter((product) => product.lastCheckedAt),
     [products],
   );
-  const sortedProducts = useMemo(
-    () => sortTrackedProducts(products, sortMode),
-    [products, sortMode],
+  const visibleProducts = useMemo(
+    () => filterTrackedProducts(products, filterMode),
+    [filterMode, products],
   );
+  const sortedProducts = useMemo(
+    () => sortTrackedProducts(visibleProducts, sortMode),
+    [sortMode, visibleProducts],
+  );
+  const totalPages = Math.max(1, Math.ceil(sortedProducts.length / pageSize));
+  const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
+  const currentPageProducts = useMemo(
+    () => sortedProducts.slice((safeCurrentPage - 1) * pageSize, safeCurrentPage * pageSize),
+    [pageSize, safeCurrentPage, sortedProducts],
+  );
+  const pageStart = sortedProducts.length ? (safeCurrentPage - 1) * pageSize + 1 : 0;
+  const pageEnd = Math.min(safeCurrentPage * pageSize, sortedProducts.length);
+  const selectedProducts = useMemo(
+    () => products.filter((product) => selectedProductIds.has(product.id)),
+    [products, selectedProductIds],
+  );
+  const currentPageSelectedCount = currentPageProducts.filter((product) => selectedProductIds.has(product.id)).length;
+  const isCurrentPageAllSelected = Boolean(currentPageProducts.length) && currentPageSelectedCount === currentPageProducts.length;
 
   const loadTrackingData = useCallback(async () => {
     if (!userId) return;
@@ -284,6 +308,29 @@ export default function CompetitorPriceChecker() {
     }
   }
 
+  async function checkSelectedProducts() {
+    const targets = selectedProducts;
+    if (!targets.length) {
+      setStatus("확인할 상품을 선택해 주세요.");
+      return;
+    }
+
+    setCheckingBatch(true);
+    setStatus(`선택한 ${targets.length.toLocaleString()}개 상품의 가격 확인을 시작했습니다.`);
+
+    try {
+      for (let index = 0; index < targets.length; index += 1) {
+        await checkProduct(targets[index]);
+        if (index < targets.length - 1) {
+          await delay(800);
+        }
+      }
+      setStatus(`선택한 ${targets.length.toLocaleString()}개 상품 확인을 완료했습니다.`);
+    } finally {
+      setCheckingBatch(false);
+    }
+  }
+
   function updateProduct(id: string, patch: Partial<TrackedBuymaProduct>) {
     const currentProduct = products.find((product) => product.id === id);
     const nextProduct = currentProduct ? { ...currentProduct, ...patch } : null;
@@ -299,6 +346,11 @@ export default function CompetitorPriceChecker() {
 
   function removeProduct(id: string) {
     setProducts((current) => current.filter((product) => product.id !== id));
+    setSelectedProductIds((current) => {
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
 
     if (userId) {
       void supabase
@@ -307,6 +359,34 @@ export default function CompetitorPriceChecker() {
         .eq("user_id", userId)
         .eq("id", id);
     }
+  }
+
+  async function removeSelectedProducts() {
+    if (!userId || !selectedProducts.length) return;
+    const ids = selectedProducts.map((product) => product.id);
+    const confirmed = window.confirm(`선택한 ${ids.length.toLocaleString()}개 상품을 삭제할까요? 이 작업은 되돌릴 수 없습니다.`);
+    if (!confirmed) return;
+
+    const previousProducts = products;
+    const previousSelectedIds = selectedProductIds;
+    setProducts((current) => current.filter((product) => !ids.includes(product.id)));
+    setSelectedProductIds(new Set());
+    setStatus("선택 삭제 중입니다.");
+
+    const { error } = await supabase
+      .from("competitor_price_products")
+      .delete()
+      .eq("user_id", userId)
+      .in("id", ids);
+
+    if (error) {
+      setProducts(previousProducts);
+      setSelectedProductIds(previousSelectedIds);
+      setStatus(`선택 삭제에 실패했습니다: ${error.message}`);
+      return;
+    }
+
+    setStatus(`선택한 ${ids.length.toLocaleString()}개 상품을 삭제했습니다.`);
   }
 
   async function removeAllProducts() {
@@ -330,6 +410,32 @@ export default function CompetitorPriceChecker() {
     }
 
     setStatus("경쟁가격 추적 상품을 모두 삭제했습니다.");
+  }
+
+  function toggleProductSelection(id: string, checked: boolean) {
+    setSelectedProductIds((current) => {
+      const next = new Set(current);
+      if (checked) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleCurrentPageSelection(checked: boolean) {
+    setSelectedProductIds((current) => {
+      const next = new Set(current);
+      currentPageProducts.forEach((product) => {
+        if (checked) {
+          next.add(product.id);
+        } else {
+          next.delete(product.id);
+        }
+      });
+      return next;
+    });
   }
 
   function downloadSampleCsv() {
@@ -414,14 +520,21 @@ export default function CompetitorPriceChecker() {
           <span className="rounded-full bg-[#fff1e6] px-3 py-1.5 text-[#b95600]">더 낮은 가격 {alertProducts.length.toLocaleString()}</span>
           <span className="rounded-full bg-[#eef3ff] px-3 py-1.5 text-[#2d73ff]">확인완료 {checkedProducts.length.toLocaleString()}</span>
         </div>
-        <div className="mt-4 flex flex-wrap items-center gap-2">
+        <p className="mt-3 text-sm font-bold text-[#6c655b]">{status}</p>
+      </section>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-sort-mode">
             정렬
           </label>
           <select
             id="competitor-sort-mode"
             value={sortMode}
-            onChange={(event) => setSortMode(event.target.value as SortMode)}
+            onChange={(event) => {
+              setSortMode(event.target.value as SortMode);
+              setCurrentPage(1);
+            }}
             className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
           >
             <option value="action">조치 필요순</option>
@@ -432,6 +545,47 @@ export default function CompetitorPriceChecker() {
             <option value="recent">최근 등록순</option>
             <option value="title">상품명순</option>
           </select>
+          <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-page-size">
+            표시
+          </label>
+          <select
+            id="competitor-page-size"
+            value={pageSize}
+            onChange={(event) => {
+              setPageSize(Number(event.target.value));
+              setCurrentPage(1);
+            }}
+            className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+          >
+            {PAGE_SIZE_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}개씩
+              </option>
+            ))}
+          </select>
+          <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-filter-mode">
+            보기
+          </label>
+          <select
+            id="competitor-filter-mode"
+            value={filterMode}
+            onChange={(event) => {
+              setFilterMode(event.target.value as ProductFilterMode);
+              setCurrentPage(1);
+            }}
+            className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+          >
+            <option value="all">전체보기</option>
+            <option value="unchecked">미확인만 보기</option>
+          </select>
+          <button
+            type="button"
+            disabled={!selectedProducts.length || checkingBatch || checkingIds.size > 0}
+            onClick={() => void checkSelectedProducts()}
+            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2d73ff]/25 bg-white px-3 text-sm font-extrabold text-[#2d73ff] transition hover:border-[#2d73ff] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            선택확인
+          </button>
           <button
             type="button"
             disabled={!products.length || checkingBatch}
@@ -440,15 +594,36 @@ export default function CompetitorPriceChecker() {
           >
             전체삭제
           </button>
+          <button
+            type="button"
+            disabled={!selectedProducts.length || checkingBatch}
+            onClick={() => void removeSelectedProducts()}
+            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#c43b2f]/25 bg-white px-3 text-sm font-extrabold text-[#c43b2f] transition hover:border-[#c43b2f] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            선택삭제
+          </button>
         </div>
-        <p className="mt-3 text-sm font-bold text-[#6c655b]">{status}</p>
-      </section>
+        <div className="text-xs font-extrabold text-[#6c655b]">
+          {pageStart.toLocaleString()}-{pageEnd.toLocaleString()} / {sortedProducts.length.toLocaleString()}
+          {selectedProducts.length ? ` · 선택 ${selectedProducts.length.toLocaleString()}` : ""}
+        </div>
+      </div>
 
       <section className="overflow-hidden rounded-lg border border-black/10 bg-white shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1180px] border-collapse text-left text-sm">
             <thead className="bg-[#f1eee6] text-xs font-extrabold text-[#6c655b]">
               <tr>
+                <th className="w-12 px-4 py-3">
+                  <input
+                    type="checkbox"
+                    checked={isCurrentPageAllSelected}
+                    disabled={!currentPageProducts.length}
+                    onChange={(event) => toggleCurrentPageSelection(event.target.checked)}
+                    aria-label="현재 페이지 전체 선택"
+                    className="h-4 w-4 rounded border-black/20"
+                  />
+                </th>
                 <th className="px-4 py-3">상태</th>
                 <th className="px-4 py-3">상품</th>
                 <th className="px-4 py-3">내 가격</th>
@@ -459,13 +634,22 @@ export default function CompetitorPriceChecker() {
               </tr>
             </thead>
             <tbody>
-              {sortedProducts.length ? (
-                sortedProducts.map((product) => {
+              {currentPageProducts.length ? (
+                currentPageProducts.map((product) => {
                   const priceStatus = getPriceStatus(product);
                   const isChecking = checkingIds.has(product.id);
 
                   return (
                     <tr key={product.id} className="border-t border-black/10 align-top">
+                      <td className="px-4 py-4">
+                        <input
+                          type="checkbox"
+                          checked={selectedProductIds.has(product.id)}
+                          onChange={(event) => toggleProductSelection(product.id, event.target.checked)}
+                          aria-label={`${product.title || product.buymaProductId || "상품"} 선택`}
+                          className="h-4 w-4 rounded border-black/20"
+                        />
+                      </td>
                       <td className="px-4 py-4">
                         <select
                           value={product.status}
@@ -546,7 +730,7 @@ export default function CompetitorPriceChecker() {
                 })
               ) : (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-sm font-bold text-[#6c655b]">
+                  <td colSpan={8} className="px-4 py-12 text-center text-sm font-bold text-[#6c655b]">
                     등록된 추적 상품이 없습니다.
                   </td>
                 </tr>
@@ -555,6 +739,28 @@ export default function CompetitorPriceChecker() {
           </table>
         </div>
       </section>
+
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <button
+          type="button"
+          disabled={safeCurrentPage <= 1}
+          onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+          className="inline-flex min-h-10 items-center justify-center rounded-lg border border-black/10 bg-white px-4 text-sm font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          이전
+        </button>
+        <span className="min-h-10 rounded-lg border border-black/10 bg-white px-4 py-2 text-sm font-extrabold text-[#151515]">
+          {safeCurrentPage.toLocaleString()} / {totalPages.toLocaleString()}
+        </span>
+        <button
+          type="button"
+          disabled={safeCurrentPage >= totalPages}
+          onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+          className="inline-flex min-h-10 items-center justify-center rounded-lg border border-black/10 bg-white px-4 text-sm font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-45"
+        >
+          다음
+        </button>
+      </div>
     </div>
   );
 }
@@ -697,6 +903,14 @@ function productPatchToRowPatch(patch: Partial<TrackedBuymaProduct>) {
   return row;
 }
 
+function filterTrackedProducts(products: TrackedBuymaProduct[], filterMode: ProductFilterMode) {
+  if (filterMode === "unchecked") {
+    return products.filter((product) => !product.lastCheckedAt);
+  }
+
+  return products;
+}
+
 function sortTrackedProducts(products: TrackedBuymaProduct[], sortMode: SortMode) {
   return [...products].sort((a, b) => {
     switch (sortMode) {
@@ -821,6 +1035,12 @@ async function readFileText(file: File) {
   } catch {
     return utf8;
   }
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function parseProductsFromCsv(text: string) {
