@@ -81,6 +81,7 @@ export default function CompetitorPriceChecker() {
   const [pageSize, setPageSize] = useState<number>(50);
   const [currentPage, setCurrentPage] = useState(1);
   const [filterMode, setFilterMode] = useState<ProductFilterMode>("all");
+  const [productNameSearch, setProductNameSearch] = useState("");
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(() => new Set());
 
   const activeProducts = useMemo(
@@ -96,8 +97,8 @@ export default function CompetitorPriceChecker() {
     [products],
   );
   const visibleProducts = useMemo(
-    () => filterTrackedProducts(products, filterMode),
-    [filterMode, products],
+    () => filterTrackedProducts(products, filterMode, productNameSearch),
+    [filterMode, productNameSearch, products],
   );
   const sortedProducts = useMemo(
     () => sortTrackedProducts(visibleProducts, sortMode),
@@ -607,6 +608,19 @@ export default function CompetitorPriceChecker() {
             <option value="unchecked">미확인만 보기</option>
             <option value="checked">확인만 보기</option>
           </select>
+          <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-product-search">
+            검색
+          </label>
+          <input
+            id="competitor-product-search"
+            value={productNameSearch}
+            onChange={(event) => {
+              setProductNameSearch(event.target.value);
+              setCurrentPage(1);
+            }}
+            placeholder="상품명 검색"
+            className="min-h-10 w-[220px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition placeholder:text-[#9a9388] focus:border-[#2d73ff]"
+          />
           <button
             type="button"
             disabled={!selectedProducts.length || checkingBatch || checkingIds.size > 0}
@@ -932,16 +946,19 @@ function productPatchToRowPatch(patch: Partial<TrackedBuymaProduct>) {
   return row;
 }
 
-function filterTrackedProducts(products: TrackedBuymaProduct[], filterMode: ProductFilterMode) {
-  if (filterMode === "unchecked") {
-    return products.filter((product) => !product.lastCheckedAt);
-  }
+function filterTrackedProducts(
+  products: TrackedBuymaProduct[],
+  filterMode: ProductFilterMode,
+  productNameSearch: string,
+) {
+  const search = productNameSearch.trim().toLowerCase();
 
-  if (filterMode === "checked") {
-    return products.filter((product) => product.lastCheckedAt);
-  }
-
-  return products;
+  return products.filter((product) => {
+    if (filterMode === "unchecked" && product.lastCheckedAt) return false;
+    if (filterMode === "checked" && !product.lastCheckedAt) return false;
+    if (search && !product.title.toLowerCase().includes(search)) return false;
+    return true;
+  });
 }
 
 function getProductLabel(product: TrackedBuymaProduct) {
