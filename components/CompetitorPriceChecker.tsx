@@ -609,10 +609,26 @@ function parseProductsFromCsv(text: string) {
 
   rows.slice(1).forEach((row, index) => {
     const buymaProductId = getCell(row, headers, ["buymaProductId", "productId", "itemId"]);
-    const buymaUrl = getCell(row, headers, ["buymaUrl", "url", "itemUrl"]);
+    const buymaUrl = getCell(row, headers, ["buymaUrl", "url", "itemUrl"]) || buildBuymaItemUrl(buymaProductId);
     const title = getCell(row, headers, ["title", "productName", "name"]);
-    const brand = getCell(row, headers, ["brand"]);
-    const modelNumber = getCell(row, headers, ["modelNumber", "model"]);
+    const brand = getCell(row, headers, ["brandName"]) || getCell(row, headers, ["brand"]);
+    const modelNumber = normalizeModelNumber(
+      getFirstCell(row, headers, [
+        "brandProductNumber1",
+        "brandProductNumber2",
+        "brandProductNumber3",
+        "brandProductNumber4",
+        "brandProductNumber5",
+        "brandProductNumber6",
+        "brandProductNumber7",
+        "brandProductNumber8",
+        "brandProductNumber9",
+        "brandProductNumber10",
+        "brandProductNumber",
+        "modelNumber",
+        "model",
+      ]),
+    );
     const ownPrice = parseNumber(getCell(row, headers, ["ownPrice", "price", "sellingPrice"]));
     const searchKeyword = getCell(row, headers, ["searchKeyword", "keyword"]);
     const searchUrl = getCell(row, headers, ["searchUrl"]);
@@ -687,7 +703,27 @@ function detectDelimiter(text: string) {
 }
 
 function normalizeHeader(value: string) {
+  const trimmed = value.trim();
+  const brandProductMatch = trimmed.match(/^ブランド品番(\d+)$/);
+  if (brandProductMatch) return `brandProductNumber${brandProductMatch[1]}`;
+  if (trimmed === "商品ID") return "buymaProductId";
+  if (trimmed === "商品名") return "title";
+  if (trimmed === "ブランド名") return "brandName";
+  if (trimmed === "ブランド") return "brand";
+  if (trimmed === "モデル") return "model";
+  if (trimmed === "単価") return "ownPrice";
+  if (trimmed === "商品管理番号") return "modelNumber";
+
   const normalized = value.trim().toLowerCase().replace(/[\s_()[\]{}]/g, "");
+
+  if (normalized === "商品id") return "buymaProductId";
+  if (normalized === "商品名") return "title";
+  if (normalized === "ブランド名") return "brandName";
+  if (normalized === "ブランド") return "brand";
+  if (normalized === "モデル") return "model";
+  if (normalized === "単価") return "ownPrice";
+  if (normalized === "ブランド品番1") return "brandProductNumber";
+  if (normalized === "商品管理番号") return "modelNumber";
 
   if (["buymaproductid", "productid", "itemid", "상품번호", "상품id", "아이템id"].includes(normalized)) return "buymaProductId";
   if (["buymaurl", "url", "itemurl", "상품url", "아이템url"].includes(normalized)) return "buymaUrl";
@@ -712,9 +748,23 @@ function getCell(row: string[], headers: string[], keys: string[]) {
   return index >= 0 ? (row[index] ?? "").trim() : "";
 }
 
+function getFirstCell(row: string[], headers: string[], keys: string[]) {
+  for (const key of keys) {
+    const value = getCell(row, headers, [key]);
+    if (value) return value;
+  }
+
+  return "";
+}
+
 function parseNumber(value: string) {
   const number = Number(value.replace(/[^\d.-]/g, ""));
   return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function normalizeModelNumber(value: string) {
+  const normalized = value.trim();
+  return normalized === "0" ? "" : normalized;
 }
 
 function mergeImportedProducts(
@@ -759,7 +809,37 @@ function getMergeKey(product: Pick<TrackedBuymaProduct, "buymaProductId" | "buym
 }
 
 function buildDefaultKeyword(brand: string, modelNumber: string, title: string) {
-  return [brand, modelNumber].filter(Boolean).join(" ") || title;
+  return dedupeKeywordParts([brand, modelNumber, title]).join(" ");
+}
+
+function buildBuymaItemUrl(buymaProductId: string) {
+  const normalized = buymaProductId.trim();
+  return /^\d+$/.test(normalized) ? `https://www.buyma.com/item/${normalized}/` : "";
+}
+
+function dedupeKeywordParts(parts: string[]) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  parts.forEach((part) => {
+    const normalized = normalizeKeywordPart(part);
+    if (!normalized) return;
+
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.push(normalized);
+  });
+
+  return result;
+}
+
+function normalizeKeywordPart(value: string) {
+  return value
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/【|】|\[|\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function toCompetitorItems(value: unknown): BuymaCompetitorPriceItem[] {
