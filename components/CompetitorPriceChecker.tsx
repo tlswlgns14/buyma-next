@@ -61,6 +61,7 @@ type CompetitorPriceProductRow = {
 const DEFAULT_OWNER_NAME = "sonokoro";
 const BATCH_LIMIT = 50;
 const PAGE_SIZE_OPTIONS = [10, 30, 50, 100, 500] as const;
+const UNCHECKED_MAX_PAGE_SIZE = 50;
 const PRODUCT_SELECT_COLUMNS =
   "id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,status,last_checked_at,last_search_url,reference_price,lower_competitors,last_results,error,created_at,csv_order,csv_imported_at";
 const PRODUCT_SELECT_COLUMNS_LEGACY =
@@ -581,7 +582,7 @@ export default function CompetitorPriceChecker() {
             className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
           >
             {PAGE_SIZE_OPTIONS.map((option) => (
-              <option key={option} value={option}>
+              <option key={option} value={option} disabled={filterMode === "unchecked" && option > UNCHECKED_MAX_PAGE_SIZE}>
                 {option}개씩
               </option>
             ))}
@@ -593,7 +594,11 @@ export default function CompetitorPriceChecker() {
             id="competitor-filter-mode"
             value={filterMode}
             onChange={(event) => {
-              setFilterMode(event.target.value as ProductFilterMode);
+              const nextFilterMode = event.target.value as ProductFilterMode;
+              setFilterMode(nextFilterMode);
+              if (nextFilterMode === "unchecked" && pageSize > UNCHECKED_MAX_PAGE_SIZE) {
+                setPageSize(UNCHECKED_MAX_PAGE_SIZE);
+              }
               setCurrentPage(1);
             }}
             className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
