@@ -11,7 +11,7 @@ import { supabase } from "@/lib/supabase";
 
 type TrackedStatus = "active" | "paused" | "missing" | "ended";
 type SortMode = "action" | "csv" | "csvReverse" | "recent" | "unchecked" | "oldestChecked" | "title";
-type ProductFilterMode = "all" | "unchecked" | "checked";
+type ProductFilterMode = "all" | "unchecked" | "checked" | "lower" | "noLower";
 
 type TrackedBuymaProduct = {
   id: string;
@@ -83,6 +83,7 @@ export default function CompetitorPriceChecker() {
   const [filterMode, setFilterMode] = useState<ProductFilterMode>("all");
   const [productNameSearch, setProductNameSearch] = useState("");
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(() => new Set());
+  const [priceEdits, setPriceEdits] = useState<Record<string, string>>({});
 
   const activeProducts = useMemo(
     () => products.filter((product) => product.status === "active"),
@@ -461,6 +462,50 @@ export default function CompetitorPriceChecker() {
     });
   }
 
+  function updatePriceEdit(productId: string, value: string) {
+    const numericValue = value.replace(/[^\d]/g, "");
+
+    setPriceEdits((current) => {
+      const next = { ...current };
+      next[productId] = numericValue;
+      return next;
+    });
+  }
+
+  function downloadPriceUpdateCsv() {
+    const targets = selectedProducts.length ? selectedProducts : sortedProducts;
+
+    if (!targets.length) {
+      setStatus("다운로드할 상품이 없습니다.");
+      return;
+    }
+
+    const rows = targets.flatMap((product) => {
+      const productId = product.buymaProductId.trim();
+      const price = getExportPrice(product, priceEdits[product.id]);
+
+      if (!productId || !price) return [];
+      return [[productId, "公開", "出品中", String(price)]];
+    });
+
+    if (!rows.length) {
+      setStatus("다운로드할 BUYMA 상품ID와 가격이 있는 상품이 없습니다.");
+      return;
+    }
+
+    const content = "\uFEFF" + toCsvContent([["商品ID", "コントロール", "公開ステータス", "単価"], ...rows]);
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `buyma_price_update_${date}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+
+    const scope = selectedProducts.length ? "선택 상품" : "필터링된 상품";
+    setStatus(`${scope} ${rows.length.toLocaleString()}개 가격수정 CSV를 다운로드했습니다.`);
+  }
+
   function downloadSampleCsv() {
     const content = [
       "商品ID,商品名,ブランド名,単価,ブランド品番1,検索キーワード,検索URL",
@@ -605,6 +650,8 @@ export default function CompetitorPriceChecker() {
             <option value="all">전체보기</option>
             <option value="unchecked">미확인만 보기</option>
             <option value="checked">확인만 보기</option>
+            <option value="lower">낮은 가격 있음</option>
+            <option value="noLower">낮은 가격 없음</option>
           </select>
           <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-product-search">
             검색
@@ -626,6 +673,14 @@ export default function CompetitorPriceChecker() {
             className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2d73ff]/25 bg-white px-3 text-sm font-extrabold text-[#2d73ff] transition hover:border-[#2d73ff] disabled:cursor-not-allowed disabled:opacity-50"
           >
             선택확인
+          </button>
+          <button
+            type="button"
+            disabled={!sortedProducts.length || checkingBatch}
+            onClick={downloadPriceUpdateCsv}
+            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2f9d62]/25 bg-white px-3 text-sm font-extrabold text-[#24784c] transition hover:border-[#2f9d62] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            가격수정 CSV
           </button>
           <button
             type="button"
@@ -652,7 +707,7 @@ export default function CompetitorPriceChecker() {
 
       <section className="overflow-hidden rounded-lg border border-black/10 bg-white shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1180px] border-collapse text-left text-sm">
+          <table className="w-full min-w-[1320px] border-collapse text-left text-sm">
             <thead className="bg-[#f1eee6] text-xs font-extrabold text-[#6c655b]">
               <tr>
                 <th className="w-12 px-4 py-3">
@@ -669,6 +724,7 @@ export default function CompetitorPriceChecker() {
                 <th className="px-4 py-3">상품</th>
                 <th className="px-4 py-3">내 가격</th>
                 <th className="px-4 py-3">최저 경쟁가</th>
+                <th className="px-4 py-3">수정가</th>
                 <th className="px-4 py-3">검색 기준</th>
                 <th className="px-4 py-3">마지막 확인</th>
                 <th className="px-4 py-3">관리</th>
@@ -731,6 +787,16 @@ export default function CompetitorPriceChecker() {
                           <StatusPill tone="danger" label="오류" />
                         )}
                       </td>
+                      <td className="px-4 py-4">
+                        <input
+                          value={getPriceEditValue(product, priceEdits)}
+                          onChange={(event) => updatePriceEdit(product.id, event.target.value)}
+                          inputMode="numeric"
+                          placeholder={String(getDefaultEditPrice(product) || product.referencePrice || product.ownPrice || "")}
+                          aria-label={`${product.title || product.buymaProductId || "상품"} 수정가`}
+                          className="min-h-9 w-28 rounded-lg border border-black/10 bg-white px-3 text-sm font-extrabold text-[#151515] outline-none transition placeholder:text-[#aaa39a] focus:border-[#2d73ff]"
+                        />
+                      </td>
                       <td className="max-w-[280px] px-4 py-4">
                         <div className="truncate font-bold text-[#151515]">{product.searchKeyword || product.title}</div>
                         {(product.lastSearchUrl || product.searchUrl || product.buymaUrl) && (
@@ -771,7 +837,7 @@ export default function CompetitorPriceChecker() {
                 })
               ) : (
                 <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-sm font-bold text-[#6c655b]">
+                  <td colSpan={9} className="px-4 py-12 text-center text-sm font-bold text-[#6c655b]">
                     {getEmptyMessage(filterMode)}
                   </td>
                 </tr>
@@ -954,6 +1020,13 @@ function filterTrackedProducts(
   return products.filter((product) => {
     if (filterMode === "unchecked" && product.lastCheckedAt) return false;
     if (filterMode === "checked" && !product.lastCheckedAt) return false;
+    if (filterMode === "lower" && !product.lowerCompetitors?.length) return false;
+    if (
+      filterMode === "noLower" &&
+      (!product.lastCheckedAt || product.error || product.lowerCompetitors?.length)
+    ) {
+      return false;
+    }
     if (search && !product.title.toLowerCase().includes(search)) return false;
     return true;
   });
@@ -966,6 +1039,8 @@ function getProductLabel(product: TrackedBuymaProduct) {
 function getEmptyMessage(filterMode: ProductFilterMode) {
   if (filterMode === "unchecked") return "미확인 상품이 없습니다.";
   if (filterMode === "checked") return "확인된 상품이 없습니다.";
+  if (filterMode === "lower") return "낮은 가격이 있는 상품이 없습니다.";
+  if (filterMode === "noLower") return "낮은 가격이 없는 상품이 없습니다.";
   return "등록된 추적 상품이 없습니다.";
 }
 
@@ -1042,6 +1117,34 @@ function getTime(value: string | undefined) {
 
   const time = new Date(value).getTime();
   return Number.isNaN(time) ? 0 : time;
+}
+
+function getExportPrice(product: TrackedBuymaProduct, editedPrice: string | undefined) {
+  const price = Number(editedPrice || getDefaultEditPrice(product) || product.referencePrice || product.ownPrice);
+  return Number.isFinite(price) && price > 0 ? Math.floor(price) : 0;
+}
+
+function getPriceEditValue(product: TrackedBuymaProduct, priceEdits: Record<string, string>) {
+  if (Object.prototype.hasOwnProperty.call(priceEdits, product.id)) {
+    return priceEdits[product.id] ?? "";
+  }
+
+  const defaultPrice = getDefaultEditPrice(product);
+  return defaultPrice ? String(defaultPrice) : "";
+}
+
+function getDefaultEditPrice(product: TrackedBuymaProduct) {
+  const lowerPrice = product.lowerCompetitors?.[0]?.price;
+  if (!lowerPrice) return 0;
+  return Math.max(1, lowerPrice - 10);
+}
+
+function toCsvContent(rows: string[][]) {
+  return rows.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
+}
+
+function escapeCsvCell(value: string) {
+  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
 type PriceStatus =
