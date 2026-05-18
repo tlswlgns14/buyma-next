@@ -3,7 +3,7 @@ import type { ChangeEvent } from "react";
 
 import { useAuth } from "@/contexts/AuthContext";
 import {
-  normalizeBuymaShopperName,
+  compareBuymaCompetitorPrices,
   type BuymaCompetitorPriceItem,
   type BuymaCompetitorPriceResponse,
 } from "@/lib/buyma/competitor-prices";
@@ -248,16 +248,14 @@ export default function CompetitorPriceChecker() {
         return;
       }
 
-      const ownerKey = normalizeBuymaShopperName(ownerName);
-      const ownResult = data.results.find((item) => normalizeBuymaShopperName(item.shopper) === ownerKey);
-      const referencePrice = ownResult?.price ?? product.ownPrice;
-      const lowerCompetitors = referencePrice
-        ? data.results.filter(
-            (item) =>
-              normalizeBuymaShopperName(item.shopper) !== ownerKey &&
-              item.price < referencePrice,
-          )
-        : [];
+      const { referencePrice, lowerCompetitors } = compareBuymaCompetitorPrices({
+        results: data.results,
+        ownerName,
+        ownPrice: product.ownPrice,
+        title: product.title,
+        modelNumber: product.modelNumber,
+        searchKeyword: keyword,
+      });
 
       updateProduct(product.id, {
         lastCheckedAt: data.checkedAt,
@@ -1341,6 +1339,8 @@ function normalizeKeywordPart(value: string) {
   return value
     .replace(/\([^)]*\)/g, " ")
     .replace(/【|】|\[|\]/g, " ")
+    .replace(/\b\d+\s*\/\s*\d+\b/g, " ")
+    .replace(/[\/\\|]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }

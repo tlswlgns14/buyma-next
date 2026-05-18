@@ -1,7 +1,7 @@
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import {
+  compareBuymaCompetitorPrices,
   fetchBuymaCompetitorPrices,
-  normalizeBuymaShopperName,
   type BuymaCompetitorPriceItem,
 } from "@/lib/buyma/competitor-prices";
 
@@ -121,16 +121,14 @@ async function checkAndSaveProduct(row: CompetitorPriceProductRow, ownerName: st
     return { id: row.id, ok: false, error: data.error };
   }
 
-  const ownerKey = normalizeBuymaShopperName(ownerName);
-  const ownResult = data.results.find((item) => normalizeBuymaShopperName(item.shopper) === ownerKey);
-  const referencePrice = ownResult?.price ?? row.own_price;
-  const lowerCompetitors = referencePrice
-    ? data.results.filter(
-        (item) =>
-          normalizeBuymaShopperName(item.shopper) !== ownerKey &&
-          item.price < referencePrice,
-      )
-    : [];
+  const { referencePrice, lowerCompetitors } = compareBuymaCompetitorPrices({
+    results: data.results,
+    ownerName,
+    ownPrice: row.own_price,
+    title: row.title,
+    modelNumber: row.model_number,
+    searchKeyword: keyword,
+  });
 
   const errorMessage = data.results.length ? null : "검색 결과에서 가격을 찾지 못했습니다.";
   const { error } = await supabase

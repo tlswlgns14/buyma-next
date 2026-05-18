@@ -15,6 +15,15 @@ export type BuymaCompetitorPriceResponse =
     }
   | { ok: false; error: string };
 
+export type BuymaCompetitorPriceComparisonInput = {
+  results: BuymaCompetitorPriceItem[];
+  ownerName: string;
+  ownPrice: number;
+  title?: string;
+  modelNumber?: string;
+  searchKeyword?: string;
+};
+
 const SHOPPER_LABELS = new Set([
   "PERSONAL SHOPPER",
   "PREMIUM PERSONAL SHOPPER",
@@ -31,6 +40,39 @@ const SKIP_TITLE_LINES = new Set([
 
 export function normalizeBuymaShopperName(value: string) {
   return value.replace(/\s+/g, "").toLowerCase();
+}
+
+export function compareBuymaCompetitorPrices({
+  results,
+  ownerName,
+  ownPrice,
+  title,
+  modelNumber,
+  searchKeyword,
+}: BuymaCompetitorPriceComparisonInput) {
+  const ownerKey = normalizeBuymaShopperName(ownerName);
+  const ownResult =
+    results.find(
+      (item) =>
+        normalizeBuymaShopperName(item.shopper) === ownerKey &&
+        isMatchingBuymaProduct(item, { title, modelNumber, searchKeyword }),
+    ) ??
+    results.find((item) => normalizeBuymaShopperName(item.shopper) === ownerKey);
+  const referencePrice = ownResult?.price ?? ownPrice;
+  const lowerCompetitors = referencePrice
+    ? results.filter(
+        (item) =>
+          normalizeBuymaShopperName(item.shopper) !== ownerKey &&
+          item.price < referencePrice &&
+          isMatchingBuymaProduct(item, { title, modelNumber, searchKeyword }),
+      )
+    : [];
+
+  return {
+    ownResult,
+    referencePrice,
+    lowerCompetitors,
+  };
 }
 
 export function parseBuymaSearchResults(html: string, baseUrl: string): BuymaCompetitorPriceItem[] {
@@ -60,7 +102,7 @@ export function parseBuymaSearchResults(html: string, baseUrl: string): BuymaCom
 }
 
 export function buildBuymaSearchUrl(keyword: string) {
-  const normalized = keyword.trim().replace(/\s+/g, " ");
+  const normalized = normalizeBuymaSearchKeyword(keyword);
   if (!normalized) return "";
 
   return `https://www.buyma.com/r/${encodeURIComponent(normalized)}/`;
@@ -241,3 +283,82 @@ function dedupeItems(items: BuymaCompetitorPriceItem[]) {
 
   return deduped;
 }
+
+function isMatchingBuymaProduct(
+  item: BuymaCompetitorPriceItem,
+  target: Pick<BuymaCompetitorPriceComparisonInput, "title" | "modelNumber" | "searchKeyword">,
+) {
+  const candidateText = normalizeComparableText([item.title, item.brand].filter(Boolean).join(" "));
+  const modelNumber = normalizeModelNumberForMatch(target.modelNumber ?? "");
+  const candidateModelText = candidateText.replace(/\s+/g, "");
+
+  if (modelNumber && candidateModelText.includes(modelNumber)) return true;
+
+  const brandTokens = new Set(tokenizeComparableText(target.searchKeyword ?? "").filter(isBrandLikeToken));
+  const targetTokens = tokenizeComparableText(target.title ?? target.searchKeyword ?? "")
+    .filter((token) => !brandTokens.has(token))
+    .filter(isProductToken);
+  const candidateTokens = new Set(tokenizeComparableText([item.title, item.brand].filter(Boolean).join(" ")));
+
+  if (!targetTokens.length) return true;
+
+  return targetTokens.every((token) => candidateTokens.has(token));
+}
+
+function normalizeComparableText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/【|】|\[|\]/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeBuymaSearchKeyword(value: string) {
+  return value
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/【|】|\[|\]/g, " ")
+    .replace(/\b\d+\s*\/\s*\d+\b/g, " ")
+    .replace(/[\/\\|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeComparableText(value: string) {
+  return normalizeComparableText(value).split(" ").filter(Boolean);
+}
+
+function normalizeModelNumberForMatch(value: string) {
+  const normalized = normalizeComparableText(value).replace(/\s+/g, "");
+  return normalized.length >= 3 && normalized !== "0" ? normalized : "";
+}
+
+function isProductToken(token: string) {
+  if (token.length < 2) return false;
+  if (/^\d+$/.test(token)) return false;
+  if (/^\d+colors?$/.test(token)) return false;
+  return !PRODUCT_MATCH_STOP_WORDS.has(token);
+}
+
+function isBrandLikeToken(token: string) {
+  return /\d/.test(token) || token.length >= 8;
+}
+
+const PRODUCT_MATCH_STOP_WORDS = new Set([
+  "color",
+  "colors",
+  "colour",
+  "colours",
+  "正規品",
+  "送料込",
+  "追跡",
+  "追跡付",
+  "関税込",
+  "日本未入荷",
+  "unisex",
+  "men",
+  "mens",
+  "women",
+  "womens",
+]);
