@@ -10,8 +10,8 @@ import {
 import { supabase } from "@/lib/supabase";
 
 type TrackedStatus = "active" | "paused" | "missing" | "ended";
-type SortMode = "action" | "csv" | "csvReverse" | "recent" | "unchecked" | "oldestChecked" | "title";
-type ProductFilterMode = "all" | "unchecked" | "checked" | "lower" | "noLower";
+type SortMode = "action" | "csv" | "csvReverse" | "unchecked" | "oldestChecked" | "title";
+type ProductFilterMode = "all" | "unchecked" | "checked" | "lower" | "noLower" | "error" | "empty" | "missing";
 
 type TrackedBuymaProduct = {
   id: string;
@@ -58,6 +58,12 @@ type CompetitorPriceProductRow = {
   csv_imported_at: string | null;
 };
 
+type CsvImportFailure = {
+  rowNumber: number;
+  reason: string;
+  rawValue: string;
+};
+
 const DEFAULT_OWNER_NAME = "sonokoro";
 const BATCH_LIMIT = 50;
 const PAGE_SIZE_OPTIONS = [10, 30, 50, 100, 500] as const;
@@ -72,8 +78,7 @@ export default function CompetitorPriceChecker() {
   const userId = authUser?.id ?? "";
   const [products, setProducts] = useState<TrackedBuymaProduct[]>([]);
   const [ownerName, setOwnerName] = useState(DEFAULT_OWNER_NAME);
-  const [pastedCsv, setPastedCsv] = useState("");
-  const [status, setStatus] = useState("CSV를 업로드하거나 붙여넣어 주세요.");
+  const [status, setStatus] = useState("CSV를 업로드해 주세요.");
   const [checkingIds, setCheckingIds] = useState<Set<string>>(() => new Set());
   const [checkingBatch, setCheckingBatch] = useState(false);
   const [trackingLoaded, setTrackingLoaded] = useState(false);
@@ -84,6 +89,7 @@ export default function CompetitorPriceChecker() {
   const [productNameSearch, setProductNameSearch] = useState("");
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(() => new Set());
   const [priceEdits, setPriceEdits] = useState<Record<string, string>>({});
+  const [csvImportFailures, setCsvImportFailures] = useState<CsvImportFailure[]>([]);
 
   const activeProducts = useMemo(
     () => products.filter((product) => product.status === "active"),
@@ -117,8 +123,15 @@ export default function CompetitorPriceChecker() {
     () => products.filter((product) => selectedProductIds.has(product.id)),
     [products, selectedProductIds],
   );
+  const priceUpdateCsvLabel = `선택 ${selectedProducts.length.toLocaleString()}개 CSV`;
+  const selectedCheckLabel = `선택 ${selectedProducts.length.toLocaleString()}개 확인`;
+  const selectedDeleteLabel = `선택 ${selectedProducts.length.toLocaleString()}개 삭제`;
   const currentPageSelectedCount = currentPageProducts.filter((product) => selectedProductIds.has(product.id)).length;
   const isCurrentPageAllSelected = Boolean(currentPageProducts.length) && currentPageSelectedCount === currentPageProducts.length;
+
+  function resetSelectionForListChange() {
+    setSelectedProductIds(new Set());
+  }
 
   const loadTrackingData = useCallback(async () => {
     if (!userId) return;
@@ -179,34 +192,50 @@ export default function CompetitorPriceChecker() {
     }
   }
 
-  async function handlePasteImport() {
-    await importProducts(pastedCsv);
-  }
-
   async function importProducts(text: string) {
     if (!userId) {
       setStatus("로그인이 필요합니다.");
       return;
     }
 
-    const imported = parseProductsFromCsv(text);
-    if (!imported.length) {
-      setStatus("가져올 상품을 찾지 못했습니다. 헤더와 가격 컬럼을 확인해 주세요.");
+    const importResult = parseProductsFromCsv(text);
+    if (!importResult.products.length) {
+      setCsvImportFailures(importResult.failures);
+      setStatus(
+        `가져올 상품을 찾지 못했습니다. 총 ${importResult.totalRows.toLocaleString()}행 중 실패 ${importResult.failedRows.toLocaleString()}행입니다. 헤더와 가격 컬럼을 확인해 주세요.`,
+      );
       return;
     }
 
     const csvImportedAt = new Date().toISOString();
-    const orderedImported = imported.map((product, index) => ({
+    const orderedImported = importResult.products.map((product, index) => ({
       ...product,
       csvOrder: index + 1,
       csvImportedAt,
     }));
     const merged = mergeImportedProducts(products, orderedImported);
-    setProducts(merged);
-    await saveProductList(userId, merged);
-    await loadTrackingData();
-    setStatus(`${imported.length.toLocaleString()}개 상품을 동기화했습니다.`);
-    setPastedCsv("");
+
+    try {
+      await saveProductList(userId, merged);
+      setProducts(merged);
+      await loadTrackingData();
+      setCsvImportFailures(importResult.failures);
+      setStatus(
+        `CSV ${importResult.totalRows.toLocaleString()}행 중 ${importResult.products.length.toLocaleString()}개 상품을 동기화했습니다. 실패 ${importResult.failedRows.toLocaleString()}행입니다.`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "CSV 저장에 실패했습니다.";
+      setCsvImportFailures([
+        {
+          rowNumber: 0,
+          reason: `DB 저장 실패: ${message}`,
+          rawValue: `전체 ${importResult.totalRows.toLocaleString()}행`,
+        },
+      ]);
+      setStatus(
+        `CSV 저장에 실패했습니다. 저장 0개, 실패 ${importResult.totalRows.toLocaleString()}행입니다. ${message}`,
+      );
+    }
   }
 
   async function checkProduct(product: TrackedBuymaProduct, options?: { silent?: boolean }) {
@@ -229,7 +258,10 @@ export default function CompetitorPriceChecker() {
     try {
       const response = await fetch("/api/buyma/competitor-prices", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
         body: JSON.stringify({
           searchUrl: product.searchUrl,
           keyword,
@@ -339,17 +371,46 @@ export default function CompetitorPriceChecker() {
       return;
     }
 
+    if (!session?.access_token) {
+      setStatus("로그인이 필요합니다.");
+      return;
+    }
+
+    const targetIds = targets.slice(0, BATCH_LIMIT).map((product) => product.id);
+    const cappedMessage =
+      targets.length > BATCH_LIMIT
+        ? ` 선택 ${targets.length.toLocaleString()}개 중 최대 ${BATCH_LIMIT}개만 확인합니다.`
+        : "";
+
     setCheckingBatch(true);
-    setStatus(`선택한 ${targets.length.toLocaleString()}개 상품의 가격 확인을 시작했습니다.`);
+    setStatus(`서버에서 선택 상품 ${targetIds.length.toLocaleString()}개 가격 확인을 시작했습니다.${cappedMessage}`);
 
     try {
-      for (let index = 0; index < targets.length; index += 1) {
-        await checkProduct(targets[index], { silent: true });
-        if (index < targets.length - 1) {
-          await delay(800);
-        }
+      const response = await fetch("/api/buyma/competitor-price-batch", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ limit: BATCH_LIMIT, ids: targetIds }),
+      });
+      const data = (await response.json()) as
+        | { ok: true; checked: number; failed: number }
+        | { ok: false; error: string };
+
+      if (!response.ok || !data.ok) {
+        setStatus(data.ok ? "선택 상품 확인에 실패했습니다." : data.error);
+        return;
       }
-      setStatus(`선택한 ${targets.length.toLocaleString()}개 상품 확인을 완료했습니다.`);
+
+      await loadTrackingData();
+      setSelectedProductIds(new Set());
+      setStatus(
+        `선택 상품 ${data.checked.toLocaleString()}개 확인 완료, 실패 ${data.failed.toLocaleString()}개입니다.${cappedMessage}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "선택 상품 확인에 실패했습니다.";
+      setStatus(message);
     } finally {
       setCheckingBatch(false);
     }
@@ -369,6 +430,12 @@ export default function CompetitorPriceChecker() {
   }
 
   function removeProduct(id: string) {
+    const product = products.find((item) => item.id === id);
+    if (!product) return;
+
+    const confirmed = window.confirm(`${getProductLabel(product)} 상품을 삭제할까요? 이 작업은 되돌릴 수 없습니다.`);
+    if (!confirmed) return;
+
     setProducts((current) => current.filter((product) => product.id !== id));
     setSelectedProductIds((current) => {
       const next = new Set(current);
@@ -413,29 +480,6 @@ export default function CompetitorPriceChecker() {
     setStatus(`선택한 ${ids.length.toLocaleString()}개 상품을 삭제했습니다.`);
   }
 
-  async function removeAllProducts() {
-    if (!userId || !products.length) return;
-    const confirmed = window.confirm("현재 계정의 경쟁가격 추적 상품을 모두 삭제할까요? 이 작업은 되돌릴 수 없습니다.");
-    if (!confirmed) return;
-
-    const previousProducts = products;
-    setProducts([]);
-    setStatus("전체 삭제 중입니다.");
-
-    const { error } = await supabase
-      .from("competitor_price_products")
-      .delete()
-      .eq("user_id", userId);
-
-    if (error) {
-      setProducts(previousProducts);
-      setStatus(`전체 삭제에 실패했습니다: ${error.message}`);
-      return;
-    }
-
-    setStatus("경쟁가격 추적 상품을 모두 삭제했습니다.");
-  }
-
   function toggleProductSelection(id: string, checked: boolean) {
     setSelectedProductIds((current) => {
       const next = new Set(current);
@@ -473,10 +517,10 @@ export default function CompetitorPriceChecker() {
   }
 
   function downloadPriceUpdateCsv() {
-    const targets = selectedProducts.length ? selectedProducts : sortedProducts;
+    const targets = selectedProducts;
 
     if (!targets.length) {
-      setStatus("다운로드할 상품이 없습니다.");
+      setStatus("가격수정 CSV로 다운로드할 상품을 선택해 주세요.");
       return;
     }
 
@@ -502,8 +546,7 @@ export default function CompetitorPriceChecker() {
     link.click();
     URL.revokeObjectURL(url);
 
-    const scope = selectedProducts.length ? "선택 상품" : "필터링된 상품";
-    setStatus(`${scope} ${rows.length.toLocaleString()}개 가격수정 CSV를 다운로드했습니다.`);
+    setStatus(`선택 상품 ${rows.length.toLocaleString()}개 가격수정 CSV를 다운로드했습니다.`);
   }
 
   function downloadSampleCsv() {
@@ -520,11 +563,29 @@ export default function CompetitorPriceChecker() {
     URL.revokeObjectURL(url);
   }
 
+  function downloadImportFailureCsv() {
+    if (!csvImportFailures.length) return;
+
+    const rows = csvImportFailures.map((failure) => [
+      formatImportFailureRowNumber(failure.rowNumber),
+      failure.reason,
+      failure.rawValue,
+    ]);
+    const content = "\uFEFF" + toCsvContent([["행", "실패이유", "원본값"], ...rows]);
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `buyma_import_failures_${date}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="grid gap-5">
-      <section className="rounded-lg border border-black/10 bg-white p-5 shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
-          <div>
+      <section className="rounded-lg border border-black/10 bg-white p-4 shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
+          <div className="rounded-lg border border-black/10 bg-[#fbfaf7] p-4">
             <div className="flex flex-wrap items-center gap-2">
               <label className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-lg bg-[#151515] px-4 text-sm font-extrabold text-white transition hover:bg-black">
                 CSV 업로드
@@ -537,13 +598,6 @@ export default function CompetitorPriceChecker() {
               </label>
               <button
                 type="button"
-                onClick={() => void handlePasteImport()}
-                className="inline-flex min-h-11 items-center justify-center rounded-lg border border-black/15 bg-white px-4 text-sm font-extrabold text-[#151515] transition hover:border-black/30"
-              >
-                붙여넣기 반영
-              </button>
-              <button
-                type="button"
                 onClick={downloadSampleCsv}
                 className="inline-flex min-h-11 items-center justify-center rounded-lg border border-black/15 bg-white px-4 text-sm font-extrabold text-[#151515] transition hover:border-black/30"
               >
@@ -551,12 +605,40 @@ export default function CompetitorPriceChecker() {
               </button>
             </div>
 
-            <textarea
-              value={pastedCsv}
-              onChange={(event) => setPastedCsv(event.target.value)}
-              placeholder="buyma_product_id,buyma_url,title,own_price,search_keyword,search_url"
-              className="mt-4 min-h-[130px] w-full resize-y rounded-lg border border-black/10 bg-[#fbfaf7] px-4 py-3 text-sm font-semibold text-[#151515] outline-none transition placeholder:text-[#9a9388] focus:border-[#2d73ff]"
-            />
+            <p className="mt-4 text-xs font-bold leading-5 text-[#6c655b]">
+              CSV 파일만 업로드할 수 있습니다. 업로드가 실패하면 기존 목록은 변경하지 않습니다.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2 text-xs font-extrabold text-[#6c655b]">
+              <span className="rounded-full bg-white px-3 py-1.5">전체 {products.length.toLocaleString()}</span>
+              <span className="rounded-full bg-white px-3 py-1.5">추적중 {activeProducts.length.toLocaleString()}</span>
+              <span className="rounded-full bg-[#fff1e6] px-3 py-1.5 text-[#b95600]">더 낮은 가격 {alertProducts.length.toLocaleString()}</span>
+              <span className="rounded-full bg-[#eef3ff] px-3 py-1.5 text-[#2d73ff]">확인완료 {checkedProducts.length.toLocaleString()}</span>
+            </div>
+            <p className="mt-3 text-sm font-bold text-[#6c655b]">{status}</p>
+            {csvImportFailures.length ? (
+              <div className="mt-4 grid gap-2 text-xs font-bold text-[#6c655b]">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span>최근 업로드 실패 {csvImportFailures.length.toLocaleString()}건</span>
+                  <button
+                    type="button"
+                    onClick={downloadImportFailureCsv}
+                    className="inline-flex min-h-8 items-center justify-center rounded-lg border border-black/15 bg-white px-3 text-xs font-extrabold text-[#151515] transition hover:border-black/30"
+                  >
+                    실패내역 CSV
+                  </button>
+                </div>
+                <ul className="grid gap-1">
+                  {csvImportFailures.slice(0, 10).map((failure, index) => (
+                    <li key={`${failure.rowNumber}-${index}`}>
+                      {formatImportFailureRowNumber(failure.rowNumber)}행 - {failure.reason}
+                    </li>
+                  ))}
+                </ul>
+                {csvImportFailures.length > 10 ? (
+                  <div>나머지 {(csvImportFailures.length - 10).toLocaleString()}건은 실패내역 CSV에서 확인할 수 있습니다.</div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           <div className="grid content-start gap-3 rounded-lg border border-black/10 bg-[#fbfaf7] p-4">
@@ -581,127 +663,126 @@ export default function CompetitorPriceChecker() {
             </p>
           </div>
         </div>
-
-        <div className="mt-4 flex flex-wrap gap-2 text-xs font-extrabold text-[#6c655b]">
-          <span className="rounded-full bg-[#f1eee6] px-3 py-1.5">전체 {products.length.toLocaleString()}</span>
-          <span className="rounded-full bg-[#f1eee6] px-3 py-1.5">추적중 {activeProducts.length.toLocaleString()}</span>
-          <span className="rounded-full bg-[#fff1e6] px-3 py-1.5 text-[#b95600]">더 낮은 가격 {alertProducts.length.toLocaleString()}</span>
-          <span className="rounded-full bg-[#eef3ff] px-3 py-1.5 text-[#2d73ff]">확인완료 {checkedProducts.length.toLocaleString()}</span>
-        </div>
-        <p className="mt-3 text-sm font-bold text-[#6c655b]">{status}</p>
       </section>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-sort-mode">
-            정렬
-          </label>
-          <select
-            id="competitor-sort-mode"
-            value={sortMode}
-            onChange={(event) => {
-              setSortMode(event.target.value as SortMode);
-              setCurrentPage(1);
-            }}
-            className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
-          >
-            <option value="action">조치 필요순</option>
-            <option value="csv">CSV 순서</option>
-            <option value="csvReverse">CSV 역순</option>
-            <option value="unchecked">미확인 우선</option>
-            <option value="oldestChecked">오래된 확인순</option>
-            <option value="recent">최근 등록순</option>
-            <option value="title">상품명순</option>
-          </select>
-          <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-page-size">
-            표시
-          </label>
-          <select
-            id="competitor-page-size"
-            value={pageSize}
-            onChange={(event) => {
-              setPageSize(Number(event.target.value));
-              setCurrentPage(1);
-            }}
-            className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
-          >
-            {PAGE_SIZE_OPTIONS.map((option) => (
-              <option key={option} value={option} disabled={filterMode === "unchecked" && option > UNCHECKED_MAX_PAGE_SIZE}>
-                {option}개씩
-              </option>
-            ))}
-          </select>
-          <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-filter-mode">
+      <div className="grid gap-3 rounded-lg border border-black/10 bg-white p-3 shadow-[0_10px_32px_rgba(61,48,35,0.06)]">
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-filter-mode">
             보기
+            <select
+              id="competitor-filter-mode"
+              value={filterMode}
+              onChange={(event) => {
+                const nextFilterMode = event.target.value as ProductFilterMode;
+                setFilterMode(nextFilterMode);
+                if (nextFilterMode === "unchecked" && pageSize > UNCHECKED_MAX_PAGE_SIZE) {
+                  setPageSize(UNCHECKED_MAX_PAGE_SIZE);
+                }
+                resetSelectionForListChange();
+                setCurrentPage(1);
+              }}
+              className="min-h-10 min-w-[140px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+            >
+              <option value="all">전체보기</option>
+              <option value="unchecked">미확인만 보기</option>
+              <option value="checked">확인만 보기</option>
+              <option value="lower">낮은 가격 있음</option>
+              <option value="noLower">낮은 가격 없음</option>
+              <option value="error">오류만 보기</option>
+              <option value="empty">검색결과 없음</option>
+              <option value="missing">파일누락만 보기</option>
+            </select>
           </label>
-          <select
-            id="competitor-filter-mode"
-            value={filterMode}
-            onChange={(event) => {
-              const nextFilterMode = event.target.value as ProductFilterMode;
-              setFilterMode(nextFilterMode);
-              if (nextFilterMode === "unchecked" && pageSize > UNCHECKED_MAX_PAGE_SIZE) {
-                setPageSize(UNCHECKED_MAX_PAGE_SIZE);
-              }
-              setCurrentPage(1);
-            }}
-            className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
-          >
-            <option value="all">전체보기</option>
-            <option value="unchecked">미확인만 보기</option>
-            <option value="checked">확인만 보기</option>
-            <option value="lower">낮은 가격 있음</option>
-            <option value="noLower">낮은 가격 없음</option>
-          </select>
-          <label className="text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-product-search">
+          <label className="grid min-w-[220px] flex-1 gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-product-search">
             검색
+            <input
+              id="competitor-product-search"
+              value={productNameSearch}
+              onChange={(event) => {
+                setProductNameSearch(event.target.value);
+                resetSelectionForListChange();
+                setCurrentPage(1);
+              }}
+              placeholder="상품명 또는 상품번호 검색"
+              className="min-h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition placeholder:text-[#9a9388] focus:border-[#2d73ff]"
+            />
           </label>
-          <input
-            id="competitor-product-search"
-            value={productNameSearch}
-            onChange={(event) => {
-              setProductNameSearch(event.target.value);
-              setCurrentPage(1);
-            }}
-            placeholder="상품명 검색"
-            className="min-h-10 w-[220px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition placeholder:text-[#9a9388] focus:border-[#2d73ff]"
-          />
-          <button
-            type="button"
-            disabled={!selectedProducts.length || checkingBatch || checkingIds.size > 0}
-            onClick={() => void checkSelectedProducts()}
-            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2d73ff]/25 bg-white px-3 text-sm font-extrabold text-[#2d73ff] transition hover:border-[#2d73ff] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            선택확인
-          </button>
-          <button
-            type="button"
-            disabled={!sortedProducts.length || checkingBatch}
-            onClick={downloadPriceUpdateCsv}
-            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2f9d62]/25 bg-white px-3 text-sm font-extrabold text-[#24784c] transition hover:border-[#2f9d62] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            가격수정 CSV
-          </button>
-          <button
-            type="button"
-            disabled={!products.length || checkingBatch}
-            onClick={() => void removeAllProducts()}
-            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#c43b2f]/25 bg-white px-3 text-sm font-extrabold text-[#c43b2f] transition hover:border-[#c43b2f] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            전체삭제
-          </button>
-          <button
-            type="button"
-            disabled={!selectedProducts.length || checkingBatch}
-            onClick={() => void removeSelectedProducts()}
-            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#c43b2f]/25 bg-white px-3 text-sm font-extrabold text-[#c43b2f] transition hover:border-[#c43b2f] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            선택삭제
-          </button>
         </div>
-        <div className="text-xs font-extrabold text-[#6c655b]">
-          {pageStart.toLocaleString()}-{pageEnd.toLocaleString()} / {sortedProducts.length.toLocaleString()}
-          {selectedProducts.length ? ` · 선택 ${selectedProducts.length.toLocaleString()}` : ""}
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="inline-flex min-h-10 items-center whitespace-nowrap rounded-lg border border-black/10 bg-[#fbfaf7] px-3 text-xs font-extrabold text-[#6c655b]">
+              {pageStart.toLocaleString()}-{pageEnd.toLocaleString()} / {sortedProducts.length.toLocaleString()}
+              {selectedProducts.length ? ` · 선택 ${selectedProducts.length.toLocaleString()}` : ""}
+            </div>
+            <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-sort-mode">
+              정렬
+              <select
+                id="competitor-sort-mode"
+                value={sortMode}
+                onChange={(event) => {
+                  setSortMode(event.target.value as SortMode);
+                  resetSelectionForListChange();
+                  setCurrentPage(1);
+                }}
+                className="min-h-10 min-w-[140px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+              >
+                <option value="action">조치 필요순</option>
+                <option value="csv">CSV 순서</option>
+                <option value="csvReverse">CSV 역순</option>
+                <option value="unchecked">미확인 우선</option>
+                <option value="oldestChecked">오래된 확인순</option>
+                <option value="title">상품명순</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="competitor-page-size">
+              표시
+              <select
+                id="competitor-page-size"
+                value={pageSize}
+                onChange={(event) => {
+                  setPageSize(Number(event.target.value));
+                  resetSelectionForListChange();
+                  setCurrentPage(1);
+                }}
+                className="min-h-10 min-w-[110px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+              >
+                {PAGE_SIZE_OPTIONS.map((option) => (
+                  <option key={option} value={option} disabled={filterMode === "unchecked" && option > UNCHECKED_MAX_PAGE_SIZE}>
+                    {option}개씩
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-black/10 bg-[#fbfaf7] p-2">
+            <span className="rounded-full bg-white px-3 py-1.5 text-xs font-extrabold text-[#6c655b]">
+              선택 {selectedProducts.length.toLocaleString()}개
+            </span>
+            <button
+              type="button"
+              disabled={!selectedProducts.length || checkingBatch || checkingIds.size > 0}
+              onClick={() => void checkSelectedProducts()}
+              className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2d73ff]/25 bg-white px-3 text-sm font-extrabold text-[#2d73ff] transition hover:border-[#2d73ff] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {selectedCheckLabel}
+            </button>
+            <button
+              type="button"
+              disabled={!selectedProducts.length || checkingBatch}
+              onClick={downloadPriceUpdateCsv}
+              className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2f9d62]/25 bg-white px-3 text-sm font-extrabold text-[#24784c] transition hover:border-[#2f9d62] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {priceUpdateCsvLabel}
+            </button>
+            <button
+              type="button"
+              disabled={!selectedProducts.length || checkingBatch}
+              onClick={() => void removeSelectedProducts()}
+              className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#c43b2f]/25 bg-white px-3 text-sm font-extrabold text-[#c43b2f] transition hover:border-[#c43b2f] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {selectedDeleteLabel}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -768,8 +849,13 @@ export default function CompetitorPriceChecker() {
                         </div>
                         {product.error && <div className="mt-2 text-xs font-bold text-[#c43b2f]">{product.error}</div>}
                       </td>
-                      <td className="px-4 py-4 font-extrabold">
-                        {formatYen(product.referencePrice || product.ownPrice)}
+                      <td className="px-4 py-4">
+                        <div className="font-extrabold">{formatYen(product.ownPrice)}</div>
+                        {hasDetectedPriceMismatch(product) ? (
+                          <div className="mt-1 text-xs font-bold text-[#b95600]">
+                            감지 {formatYen(product.referencePrice)}
+                          </div>
+                        ) : null}
                       </td>
                       <td className="px-4 py-4">
                         {priceStatus.kind === "lower" ? (
@@ -851,7 +937,10 @@ export default function CompetitorPriceChecker() {
         <button
           type="button"
           disabled={safeCurrentPage <= 1}
-          onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+          onClick={() => {
+            resetSelectionForListChange();
+            setCurrentPage((page) => Math.max(1, page - 1));
+          }}
           className="inline-flex min-h-10 items-center justify-center rounded-lg border border-black/10 bg-white px-4 text-sm font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-45"
         >
           이전
@@ -862,7 +951,10 @@ export default function CompetitorPriceChecker() {
         <button
           type="button"
           disabled={safeCurrentPage >= totalPages}
-          onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+          onClick={() => {
+            resetSelectionForListChange();
+            setCurrentPage((page) => Math.min(totalPages, page + 1));
+          }}
           className="inline-flex min-h-10 items-center justify-center rounded-lg border border-black/10 bg-white px-4 text-sm font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-45"
         >
           다음
@@ -1021,13 +1113,23 @@ function filterTrackedProducts(
     if (filterMode === "unchecked" && product.lastCheckedAt) return false;
     if (filterMode === "checked" && !product.lastCheckedAt) return false;
     if (filterMode === "lower" && !product.lowerCompetitors?.length) return false;
+    if (filterMode === "error" && (!product.error || product.lastResults?.length === 0)) return false;
+    if (filterMode === "empty" && (!product.error || product.lastResults?.length !== 0)) return false;
+    if (filterMode === "missing" && product.status !== "missing") return false;
     if (
       filterMode === "noLower" &&
       (!product.lastCheckedAt || product.error || product.lowerCompetitors?.length)
     ) {
       return false;
     }
-    if (search && !product.title.toLowerCase().includes(search)) return false;
+    if (
+      search &&
+      ![product.title, product.buymaProductId].some((value) =>
+        value.toLowerCase().includes(search),
+      )
+    ) {
+      return false;
+    }
     return true;
   });
 }
@@ -1041,6 +1143,9 @@ function getEmptyMessage(filterMode: ProductFilterMode) {
   if (filterMode === "checked") return "확인된 상품이 없습니다.";
   if (filterMode === "lower") return "낮은 가격이 있는 상품이 없습니다.";
   if (filterMode === "noLower") return "낮은 가격이 없는 상품이 없습니다.";
+  if (filterMode === "error") return "오류가 있는 상품이 없습니다.";
+  if (filterMode === "empty") return "검색결과 없는 상품이 없습니다.";
+  if (filterMode === "missing") return "파일누락 상품이 없습니다.";
   return "등록된 추적 상품이 없습니다.";
 }
 
@@ -1051,8 +1156,6 @@ function sortTrackedProducts(products: TrackedBuymaProduct[], sortMode: SortMode
         return compareDateDesc(a.csvImportedAt, b.csvImportedAt) || compareNumberAsc(a.csvOrder, b.csvOrder) || compareTitle(a, b);
       case "csvReverse":
         return compareDateDesc(a.csvImportedAt, b.csvImportedAt) || compareNumberDesc(a.csvOrder, b.csvOrder) || compareTitle(a, b);
-      case "recent":
-        return compareDateDesc(a.createdAt, b.createdAt) || compareTitle(a, b);
       case "unchecked":
         return compareUnchecked(a, b) || compareDateDesc(a.createdAt, b.createdAt) || compareTitle(a, b);
       case "oldestChecked":
@@ -1093,7 +1196,7 @@ function compareUnchecked(a: TrackedBuymaProduct, b: TrackedBuymaProduct) {
 }
 
 function compareCheckedAtAsc(a: TrackedBuymaProduct, b: TrackedBuymaProduct) {
-  return getTime(a.lastCheckedAt) - getTime(b.lastCheckedAt);
+  return getCheckedTimeForSort(a.lastCheckedAt) - getCheckedTimeForSort(b.lastCheckedAt);
 }
 
 function compareDateDesc(a: string | undefined, b: string | undefined) {
@@ -1119,6 +1222,13 @@ function getTime(value: string | undefined) {
   return Number.isNaN(time) ? 0 : time;
 }
 
+function getCheckedTimeForSort(value: string | undefined) {
+  if (!value) return Number.MAX_SAFE_INTEGER;
+
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? Number.MAX_SAFE_INTEGER : time;
+}
+
 function getExportPrice(product: TrackedBuymaProduct, editedPrice: string | undefined) {
   const price = Number(editedPrice || getDefaultEditPrice(product) || product.referencePrice || product.ownPrice);
   return Number.isFinite(price) && price > 0 ? Math.floor(price) : 0;
@@ -1137,6 +1247,14 @@ function getDefaultEditPrice(product: TrackedBuymaProduct) {
   const lowerPrice = product.lowerCompetitors?.[0]?.price;
   if (!lowerPrice) return 0;
   return Math.max(1, lowerPrice - 10);
+}
+
+function hasDetectedPriceMismatch(product: TrackedBuymaProduct) {
+  return Boolean(product.referencePrice && product.referencePrice !== product.ownPrice);
+}
+
+function formatImportFailureRowNumber(rowNumber: number) {
+  return rowNumber > 0 ? String(rowNumber) : "전체";
 }
 
 function toCsvContent(rows: string[][]) {
@@ -1198,20 +1316,24 @@ async function readFileText(file: File) {
   }
 }
 
-function delay(ms: number) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
-}
-
 function parseProductsFromCsv(text: string) {
   const rows = parseDelimitedRows(text.trim().replace(/^\uFEFF/, ""));
-  if (rows.length < 2) return [];
+  if (rows.length < 2) {
+    return {
+      products: [],
+      totalRows: 0,
+      failedRows: 0,
+      failures: [],
+    };
+  }
 
   const headers = rows[0].map(normalizeHeader);
   const products: TrackedBuymaProduct[] = [];
+  const seenKeys = new Set<string>();
+  const failures: CsvImportFailure[] = [];
+  const dataRows = rows.slice(1);
 
-  rows.slice(1).forEach((row, index) => {
+  dataRows.forEach((row, index) => {
     const buymaProductId = getCell(row, headers, ["buymaProductId", "productId", "itemId"]);
     const buymaUrl = getCell(row, headers, ["buymaUrl", "url", "itemUrl"]) || buildBuymaItemUrl(buymaProductId);
     const title = getCell(row, headers, ["title", "productName", "name"]);
@@ -1237,9 +1359,16 @@ function parseProductsFromCsv(text: string) {
     const searchKeyword = getCell(row, headers, ["searchKeyword", "keyword"]);
     const searchUrl = getCell(row, headers, ["searchUrl"]);
 
-    if (!buymaProductId && !buymaUrl && !title) return;
+    if (!buymaProductId && !buymaUrl && !title) {
+      failures.push({
+        rowNumber: index + 2,
+        reason: "상품ID, BUYMA URL, 상품명이 모두 비어 있습니다.",
+        rawValue: row.join(" | "),
+      });
+      return;
+    }
 
-    products.push({
+    const product = {
       id: makeProductKey({ buymaProductId, buymaUrl, title }, index),
       buymaProductId,
       buymaUrl,
@@ -1250,10 +1379,28 @@ function parseProductsFromCsv(text: string) {
       searchKeyword: searchKeyword || buildDefaultKeyword(brand, modelNumber, title),
       searchUrl,
       status: "active",
-    });
+    } satisfies TrackedBuymaProduct;
+    const mergeKey = getMergeKey(product);
+
+    if (seenKeys.has(mergeKey)) {
+      failures.push({
+        rowNumber: index + 2,
+        reason: "같은 CSV 안에 동일 상품이 중복되어 있습니다.",
+        rawValue: row.join(" | "),
+      });
+      return;
+    }
+
+    seenKeys.add(mergeKey);
+    products.push(product);
   });
 
-  return products;
+  return {
+    products,
+    totalRows: dataRows.length,
+    failedRows: failures.length,
+    failures,
+  };
 }
 
 function parseDelimitedRows(text: string) {
@@ -1379,26 +1526,34 @@ function mergeImportedProducts(
   const importedKeys = new Set(imported.map(getMergeKey));
   const merged = imported.map((product) => {
     const existing = currentMap.get(getMergeKey(product));
-    return existing
-      ? {
-          ...existing,
-          ...product,
-          id: existing.id,
-          status: (existing.status === "ended" ? "ended" : "active") as TrackedStatus,
-          lastCheckedAt: existing.lastCheckedAt,
-          lastSearchUrl: existing.lastSearchUrl,
-          referencePrice: existing.referencePrice,
-          lowerCompetitors: existing.lowerCompetitors,
-          lastResults: existing.lastResults,
-          error: existing.error,
-        }
-      : product;
+    if (!existing) return product;
+
+    const shouldRecheck = hasComparisonInputChanged(existing, product);
+    return {
+      ...existing,
+      ...product,
+      id: existing.id,
+      status: (existing.status === "ended" ? "ended" : "active") as TrackedStatus,
+      lastCheckedAt: shouldRecheck ? undefined : existing.lastCheckedAt,
+      lastSearchUrl: shouldRecheck ? undefined : existing.lastSearchUrl,
+      referencePrice: shouldRecheck ? undefined : existing.referencePrice,
+      lowerCompetitors: shouldRecheck ? [] : existing.lowerCompetitors,
+      lastResults: shouldRecheck ? [] : existing.lastResults,
+      error: shouldRecheck ? undefined : existing.error,
+    };
   });
   const missing: TrackedBuymaProduct[] = current
     .filter((product) => !importedKeys.has(getMergeKey(product)))
     .map((product) => (product.status === "active" ? { ...product, status: "missing" as const } : product));
 
   return [...merged, ...missing];
+}
+
+function hasComparisonInputChanged(
+  existing: TrackedBuymaProduct,
+  imported: TrackedBuymaProduct,
+) {
+  return existing.ownPrice !== imported.ownPrice || existing.searchUrl !== imported.searchUrl;
 }
 
 function makeProductKey(

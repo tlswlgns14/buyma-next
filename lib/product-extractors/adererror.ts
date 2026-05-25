@@ -434,7 +434,8 @@ function joinBlocks(...blocks: string[]) {
 
 function cleanSizeName(value: unknown) {
   const size = cleanText(value).toUpperCase().replace(/\s+/g, " ");
-  if (/^(?:OS|O\/S|ONE|ONE SIZE|ONESIZE|FREE SIZE|FREE-SIZE)$/.test(size)) return "FREE";
+  const compact = size.replace(/[\s-]+/g, "");
+  if (/^(?:OS|O\/S|ONE|ONESIZE|ONE\(SIZE\)|OS\(ONESIZE\)|O\/S\(ONESIZE\)|FREE|FREESIZE|FREE\(SIZE\)|FREE\(ONESIZE\))$/.test(compact)) return "FREE";
   return size;
 }
 

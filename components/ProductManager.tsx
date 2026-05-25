@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { useAuth } from "@/contexts/AuthContext";
 import {
   DEFAULT_BUYMA_SETTINGS,
 } from "@/lib/buyma/data";
@@ -15,11 +16,18 @@ import { getKoreanCategoryLabel, sortSeasonOptionsDescending } from "@/lib/buyma
 import { BUYMA_BRAND_OPTIONS, findBuymaBrand } from "@/lib/buyma/brands";
 import type { BuymaBrandOption } from "@/lib/buyma/brands";
 import { getJapaneseBrandDescription } from "@/lib/buyma/brand-descriptions";
-import { generateBuymaCsvBundle } from "@/lib/buyma/csv";
+import { getBuymaCsvProductSourceIndexes, generateBuymaCsvBundle } from "@/lib/buyma/csv";
+import {
+  getBuymaCategoryGender,
+  getPairedBuymaCategoryId,
+  isValidBuymaCategoryId,
+  resolveUnisexBuymaCategories,
+} from "@/lib/buyma/categories";
 import {
   clearStoredProducts,
+  clearStoredSettings,
   loadStoredSettings,
-  saveStoredSettings,
+  normalizeBuymaSettings,
 } from "@/lib/buyma/storage";
 import type {
   BuymaDescriptionPlacement,
@@ -70,7 +78,6 @@ type EditorDragTarget =
 type BuymaSizeOption = { id: string; name: string; label: string };
 type ProductDirtyFields = Partial<Record<keyof ProductDraft, true>>;
 
-const DEFAULT_SHIPPING_METHOD_OPTION_ID = "J1064891";
 const IMAGE_UPLOAD_CONCURRENCY = 3;
 
 const BUYMA_SEASON_OPTIONS = sortSeasonOptionsDescending(BUYMA_SEASONS);
@@ -85,9 +92,12 @@ const BUYMA_CATEGORY_SEARCH_OPTIONS = BUYMA_CATEGORIES.map((category) => {
   };
 });
 
-function normalizeShippingMethodSelectValue(value: string | undefined) {
+function normalizeShippingMethodSelectValue(
+  value: string | undefined,
+  options: BuymaShippingMethod[],
+) {
   const text = value?.trim();
-  if (!text) return DEFAULT_SHIPPING_METHOD_OPTION_ID;
+  if (!text) return options[0]?.id ?? "";
   return normalizeShippingMethodOptionId(text);
 }
 
@@ -138,9 +148,12 @@ function getJpyPerKrwRate(krwPerJpyRate: number) {
 }
 
 export default function ProductManager() {
+  const { authUser, session } = useAuth();
   const [products, setProducts] = useState<ProductDraft[]>([]);
   const [csvProducts, setCsvProducts] = useState<Array<ProductDraft | null>>([]);
-  const [settings, setSettings] = useState<BuymaSettings>(() => loadStoredSettings());
+  const [settings, setSettings] = useState<BuymaSettings>(() => DEFAULT_BUYMA_SETTINGS);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [settingsOwnerId, setSettingsOwnerId] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
   const [activeTab, setActiveTab] = useState<ToolTab>("edit");
   const [csvPreviewOpen, setCsvPreviewOpen] = useState(true);
@@ -158,6 +171,10 @@ export default function ProductManager() {
   const activeProduct = activeIndex >= 0 ? products[activeIndex] ?? null : null;
   const collectedCsvRows = useMemo(() => getCollectedCsvProductRows(csvProducts), [csvProducts]);
   const collectedCsvProducts = useMemo(() => collectedCsvRows.map(({ product }) => product), [collectedCsvRows]);
+  const csvItemSourceIndexes = useMemo(
+    () => getBuymaCsvProductSourceIndexes(collectedCsvProducts),
+    [collectedCsvProducts],
+  );
   const shippingMethodOptions = useMemo(() => getShippingMethodOptions(settings), [settings]);
   const csvBundle = useMemo(
     () => generateBuymaCsvBundle(collectedCsvProducts, settings),
@@ -183,13 +200,102 @@ export default function ProductManager() {
   }, []);
 
   useEffect(() => {
-    saveStoredSettings(settings);
-  }, [settings]);
+    let cancelled = false;
+
+    async function loadUserSettings() {
+      if (!authUser?.id) {
+        setSettingsLoaded(false);
+        setSettingsOwnerId("");
+        return;
+      }
+
+      setSettingsLoaded(false);
+      setSettingsOwnerId("");
+
+      if (!session?.access_token) {
+        return;
+      }
+
+      let data:
+        | { ok: true; settings: BuymaSettings; exists: boolean }
+        | { ok: false; error: string };
+
+      try {
+        const response = await fetch("/api/buyma/settings", {
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+          },
+        });
+        data = (await response.json()) as
+          | { ok: true; settings: BuymaSettings; exists: boolean }
+          | { ok: false; error: string };
+
+        if (!response.ok) {
+          throw new Error(data.ok ? "설정을 불러오지 못했습니다." : data.error);
+        }
+
+        if (!data.ok) {
+          throw new Error(data.error);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setSettings(normalizeBuymaSettings({}));
+          setSettingsOwnerId(authUser.id);
+          setSettingsLoaded(true);
+          setStatus(error instanceof Error ? error.message : "설정을 불러오지 못했습니다.");
+        }
+        return;
+      }
+
+      if (cancelled) return;
+
+      setSettings(
+        data.exists ? data.settings : loadStoredSettings(),
+      );
+      clearStoredSettings();
+      setSettingsOwnerId(authUser.id);
+      setSettingsLoaded(true);
+    }
+
+    void loadUserSettings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser?.id, session?.access_token]);
+
+  useEffect(() => {
+    if (!settingsLoaded || !authUser?.id || !session?.access_token || settingsOwnerId !== authUser.id) return;
+
+    const timeout = window.setTimeout(() => {
+      void fetch("/api/buyma/settings", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ settings }),
+      }).then(async (response) => {
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          setStatus(body?.error ?? "설정 저장에 실패했습니다.");
+        }
+      }).catch((error) => {
+        setStatus(error instanceof Error ? error.message : "설정 저장에 실패했습니다.");
+      });
+    }, 400);
+
+    return () => window.clearTimeout(timeout);
+  }, [authUser?.id, session?.access_token, settings, settingsLoaded, settingsOwnerId]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadTodayExchangeRate() {
+      if (!settingsLoaded || !authUser?.id || settingsOwnerId !== authUser.id) return;
+
       try {
         const response = await fetch("/api/exchange-rate");
         const data = (await response.json()) as
@@ -211,7 +317,7 @@ export default function ProductManager() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authUser?.id, settingsLoaded, settingsOwnerId]);
 
   async function scrapeUrls() {
     const urls = getUrls(urlsInput);
@@ -321,7 +427,8 @@ export default function ProductManager() {
       setCurrentProductsCollected(true);
       setManualProductFields(nextManualProductFields);
       setCsvPreviewOpen(true);
-      setStatus(`정보 취합 완료: 현재 상품 ${normalizedProducts.length}개 반영, 총 ${getCollectedCsvProducts(nextCsvProducts).length}개 상품이 CSV 데이터에 반영됐습니다.`);
+      const nextCsvItemCount = getBuymaCsvProductSourceIndexes(getCollectedCsvProducts(nextCsvProducts)).length;
+      setStatus(`정보 취합 완료: 현재 상품 ${normalizedProducts.length}개 반영, 총 ${nextCsvItemCount}개 상품이 CSV 데이터에 반영됐습니다.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "정보 취합 중 오류가 발생했습니다.");
     } finally {
@@ -385,14 +492,18 @@ export default function ProductManager() {
   }
 
   function deleteCsvProduct(rowIndex: number) {
-    const target = collectedCsvRows[rowIndex];
+    const sourceRowIndex = csvItemSourceIndexes[rowIndex] ?? rowIndex;
+    const target = collectedCsvRows[sourceRowIndex];
     if (!target) return;
 
     const productTitle = target.product.title || `${rowIndex + 1}번째 상품`;
+    const deletedItemRowIndexes = csvItemSourceIndexes
+      .map((sourceIndex, itemRowIndex) => sourceIndex === sourceRowIndex ? itemRowIndex : -1)
+      .filter((itemRowIndex) => itemRowIndex >= 0);
 
     setCsvProducts((current) => current.filter((_, index) => index !== target.index));
     setCsvEdits((current) => ({
-      items: shiftCsvEditsAfterRowDelete(current.items, rowIndex),
+      items: shiftCsvEditsAfterRowDeletes(current.items, deletedItemRowIndexes),
       colorSizes: {},
     }));
     setCurrentCsvRowIndexes((current) => current
@@ -458,7 +569,7 @@ export default function ProductManager() {
       const zipBlob = createZipBlob(files);
       const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
       triggerDownload(zipBlob, `buyma_bulk_${date}.zip`);
-      setStatus(`ZIP 다운로드 완료: ${exportProducts.length}개 상품`);
+      setStatus(`ZIP 다운로드 완료: ${getBuymaCsvProductSourceIndexes(exportProducts).length}개 상품`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "ZIP 생성 중 오류가 발생했습니다.");
     } finally {
@@ -638,7 +749,10 @@ function BasicInfoPanel({
   const selectedImage = images[selectedImageIndex] ?? images[0] ?? "";
   const addImageInputRef = useRef<HTMLInputElement | null>(null);
   const [isImageManagerOpen, setIsImageManagerOpen] = useState(false);
-  const hasCategory = isValidBuymaCategory(product?.category);
+  const unisexCategories = resolveUnisexBuymaCategories(product ?? {});
+  const hasCategory = product?.unisex
+    ? Boolean(unisexCategories.menCategory && unisexCategories.womenCategory)
+    : isValidBuymaCategory(product?.category);
   const hasSeason = isValidBuymaSeason(product?.season);
 
   function updateImages(nextImages: string[]) {
@@ -769,22 +883,23 @@ function BasicInfoPanel({
 
         <div className="buyma-form-grid col3">
           <Field label="매입지역(買付エリア)">
-            <input value={product?.purchaseArea ?? "2002003"} onChange={(event) => onChange({ purchaseArea: event.target.value })} placeholder="매입지역(買付エリア)" />
+            <input disabled value={product?.purchaseArea ?? "2002003"} onChange={(event) => onChange({ purchaseArea: event.target.value })} placeholder="매입지역(買付エリア)" />
           </Field>
           <Field label="매입도시(買付都市)">
-            <input value={normalizeBuymaCityInput(product?.purchaseCity)} onChange={(event) => onChange({ purchaseCity: normalizeBuymaCityInput(event.target.value) })} placeholder="매입도시(買付都市)" />
+            <input disabled value={normalizeBuymaCityInput(product?.purchaseCity)} onChange={(event) => onChange({ purchaseCity: normalizeBuymaCityInput(event.target.value) })} placeholder="매입도시(買付都市)" />
           </Field>
           <Field label="매입샵(買付ショップ)">
             <input value={product?.purchaseShop ?? "公式オンラインショップ"} onChange={(event) => onChange({ purchaseShop: event.target.value })} placeholder="매입샵(買付ショップ)" />
           </Field>
           <Field label="발송지역(発送エリア)">
-            <input value={product?.shippingArea ?? "2002003"} onChange={(event) => onChange({ shippingArea: event.target.value })} placeholder="발송지역(発送エリア)" />
+            <input disabled value={product?.shippingArea ?? "2002003"} onChange={(event) => onChange({ shippingArea: event.target.value })} placeholder="발송지역(発送エリア)" />
           </Field>
           <Field label="발송도시(発送都市)">
-            <input value={normalizeBuymaCityInput(product?.shippingCity)} onChange={(event) => onChange({ shippingCity: normalizeBuymaCityInput(event.target.value) })} placeholder="발송도시(発送都市)" />
+            <input disabled value={normalizeBuymaCityInput(product?.shippingCity)} onChange={(event) => onChange({ shippingCity: normalizeBuymaCityInput(event.target.value) })} placeholder="발송도시(発送都市)" />
           </Field>
           <Field label="배송방법(配送方法)">
-            <select value={normalizeShippingMethodSelectValue(product?.shippingMethod)} onChange={(event) => onChange({ shippingMethod: event.target.value })}>
+            <select value={normalizeShippingMethodSelectValue(product?.shippingMethod, shippingMethodOptions)} onChange={(event) => onChange({ shippingMethod: event.target.value })}>
+              {shippingMethodOptions.length ? null : <option value="">배송방법을 설정하세요</option>}
               {shippingMethodOptions.map((method) => (
                 <option key={method.id} value={method.id}>{method.label}</option>
               ))}
@@ -799,11 +914,26 @@ function BasicInfoPanel({
           <Field label="판매가격(円)">
             <input className="buyma-required-red" type="number" value={product?.sellingPrice || calculatedPrice || 0} onChange={(event) => onChange({ sellingPrice: Number(event.target.value) || undefined })} />
           </Field>
-          <Field label="카테고리">
-            <CategorySearchInput value={product?.category ?? ""} required={!hasCategory} onChange={(category) => onChange({ category })} />
-          </Field>
+          {product?.unisex ? (
+            <>
+              <Field label="남성 카테고리">
+                <CategorySearchInput value={unisexCategories.menCategory} required={!unisexCategories.menCategory} onChange={(menCategory) => onChange({ menCategory, category: menCategory || product?.category })} />
+              </Field>
+              <Field label="여성 카테고리">
+                <CategorySearchInput value={unisexCategories.womenCategory} required={!unisexCategories.womenCategory} onChange={(womenCategory) => onChange({ womenCategory, category: womenCategory || product?.category })} />
+              </Field>
+            </>
+          ) : (
+            <Field label="카테고리">
+              <CategorySearchInput value={product?.category ?? ""} required={!hasCategory} onChange={(category) => onChange({ category })} />
+            </Field>
+          )}
           <label className="buyma-chk buyma-inline-bottom">
-            <input type="checkbox" checked={Boolean(product?.unisex)} onChange={(event) => onChange({ unisex: event.target.checked })} /> 남녀공용
+            <input
+              type="checkbox"
+              checked={Boolean(product?.unisex)}
+              onChange={(event) => onChange(event.target.checked ? buildUnisexCategoryPatch(product) : { unisex: false })}
+            /> 남녀공용
           </label>
         </div>
 
@@ -2235,7 +2365,7 @@ function CsvTable({
 }) {
   const rows = csvToRows(csv);
   const headers = rows[0] ?? [];
-  const body = rows.slice(1, 30);
+  const body = rows.slice(1);
   const hasRowAction = Boolean(renderRowAction);
   const editable = Boolean(onCellChange);
 
@@ -2698,13 +2828,16 @@ function applyCsvEdits(csv: string, edits: CsvCellEdits) {
   return rowsToCsv(rows, descriptionColumnIndex >= 0 ? new Set([descriptionColumnIndex]) : undefined);
 }
 
-function shiftCsvEditsAfterRowDelete(edits: CsvCellEdits, deletedRowIndex: number) {
+function shiftCsvEditsAfterRowDeletes(edits: CsvCellEdits, deletedRowIndexes: number[]) {
+  const deletedRows = new Set(deletedRowIndexes);
+  const sortedDeletedRows = [...deletedRows].sort((left, right) => left - right);
   const nextEdits: CsvCellEdits = {};
 
   Object.entries(edits).forEach(([key, value]) => {
     const [rowIndex, cellIndex] = parseCsvEditKey(key);
-    if (rowIndex === deletedRowIndex) return;
-    const nextRowIndex = rowIndex > deletedRowIndex ? rowIndex - 1 : rowIndex;
+    if (deletedRows.has(rowIndex)) return;
+    const deletedBeforeCount = sortedDeletedRows.filter((deletedRowIndex) => deletedRowIndex < rowIndex).length;
+    const nextRowIndex = rowIndex - deletedBeforeCount;
     nextEdits[getCsvEditKey(nextRowIndex, cellIndex)] = value;
   });
 
@@ -2785,7 +2918,13 @@ function findProductMissingCategoryOrSeason(products: ProductDraft[]) {
     const category = cleanText(product.category);
     const season = cleanText(product.season);
 
-    if (!isValidBuymaCategory(category)) fields.push("카테고리");
+    if (product.unisex) {
+      const { menCategory, womenCategory } = resolveUnisexBuymaCategories(product);
+      if (!isValidBuymaCategory(menCategory)) fields.push("남성 카테고리");
+      if (!isValidBuymaCategory(womenCategory)) fields.push("여성 카테고리");
+    } else if (!isValidBuymaCategory(category)) {
+      fields.push("카테고리");
+    }
     if (!isValidBuymaSeason(season)) fields.push("시즌");
     if (fields.length) return { index, fields };
   }
@@ -2794,8 +2933,27 @@ function findProductMissingCategoryOrSeason(products: ProductDraft[]) {
 }
 
 function isValidBuymaCategory(category: unknown) {
-  const categoryId = cleanText(category);
-  return Boolean(categoryId && BUYMA_CATEGORIES.some((item) => item.id === categoryId));
+  return isValidBuymaCategoryId(category);
+}
+
+function buildUnisexCategoryPatch(product: ProductDraft | null): Partial<ProductDraft> {
+  if (!product) return { unisex: true };
+
+  const resolved = resolveUnisexBuymaCategories(product);
+  const category = cleanText(product.category);
+  const categoryGender = getBuymaCategoryGender(category);
+  const menCategory = resolved.menCategory || (
+    categoryGender === "women" ? getPairedBuymaCategoryId(category, "men") : ""
+  );
+  const womenCategory = resolved.womenCategory || (
+    categoryGender === "men" ? getPairedBuymaCategoryId(category, "women") : ""
+  );
+
+  return {
+    unisex: true,
+    menCategory,
+    womenCategory,
+  };
 }
 
 function isValidBuymaSeason(season: unknown) {
@@ -2811,6 +2969,8 @@ const BUYMA_LISTING_FIELD_KEYS: Array<keyof ProductDraft> = [
   "publicStatus",
   "theme",
   "unisex",
+  "menCategory",
+  "womenCategory",
   "tags",
   "purchaseDeadline",
   "purchaseQuantity",

@@ -1,9 +1,5 @@
-import type { BuymaSettings, BuymaShippingMethod } from "./types";
+import type { BuymaSettings } from "./types";
 
-export const DEFAULT_BUYMA_SHIPPING_METHODS: BuymaShippingMethod[] = [
-  { id: "J1064891", label: "1064891 注文完了後 7~14日" },
-  { id: "J1072560", label: "1072560 発送後 5~8日" },
-];
 export const BUYMA_SHIPPING_METHODS_VERSION = 1;
 
 export const DEFAULT_BUYMA_SETTINGS: BuymaSettings = {
@@ -13,7 +9,7 @@ export const DEFAULT_BUYMA_SETTINGS: BuymaSettings = {
   productTitlePrefix: "",
   productDescriptionPrefix: "",
   productDescriptionPlacement: "before",
-  shippingMethods: DEFAULT_BUYMA_SHIPPING_METHODS,
+  shippingMethods: [],
   shippingMethodsInitialized: true,
   shippingMethodsVersion: BUYMA_SHIPPING_METHODS_VERSION,
   customColors: "",

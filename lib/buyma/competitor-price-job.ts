@@ -1,5 +1,9 @@
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 import {
+  canUseCompetitorPrices,
+  loadCompetitorPriceUserIds,
+} from "@/lib/competitor-price-access";
+import {
   compareBuymaCompetitorPrices,
   fetchBuymaCompetitorPrices,
   type BuymaCompetitorPriceItem,
@@ -8,6 +12,8 @@ import {
 const DEFAULT_OWNER_NAME = "sonokoro";
 const CHECK_INTERVAL_HOURS = 24;
 const MAX_BATCH_LIMIT = 50;
+const MIN_BATCH_DELAY_MS = 2500;
+const MAX_BATCH_DELAY_MS = 6000;
 
 type CompetitorPriceProductRow = {
   id: string;
@@ -36,17 +42,38 @@ type BatchResult = {
 export async function runCompetitorPriceBatch(input: {
   userId?: string;
   limit?: number;
+  productIds?: string[];
 }) {
   const supabase = getSupabaseAdmin();
+  const allowedUserIds = input.userId
+    ? ((await canUseCompetitorPrices(supabase, input.userId)) ? [input.userId] : [])
+    : await loadCompetitorPriceUserIds(supabase);
+
+  if (!allowedUserIds.length) {
+    return {
+      checked: 0,
+      failed: 0,
+      results: [],
+    };
+  }
+
   const limit = clampBatchLimit(input.limit);
+  const productIds = normalizeProductIds(input.productIds).slice(0, limit);
   let query = supabase
     .from("competitor_price_products")
     .select(
       "id,user_id,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url",
     )
-    .eq("status", "active")
-    .order("last_checked_at", { ascending: true, nullsFirst: true })
-    .limit(limit);
+    .in("user_id", allowedUserIds);
+
+  if (productIds.length) {
+    query = query.in("id", productIds).limit(limit);
+  } else {
+    query = query
+      .eq("status", "active")
+      .order("last_checked_at", { ascending: true, nullsFirst: true })
+      .limit(limit);
+  }
 
   if (input.userId) {
     query = query.eq("user_id", input.userId);
@@ -58,7 +85,7 @@ export async function runCompetitorPriceBatch(input: {
     throw error;
   }
 
-  const rows = (products ?? []) as CompetitorPriceProductRow[];
+  const rows = orderRowsByProductIds((products ?? []) as CompetitorPriceProductRow[], productIds);
   const ownerNames = await loadOwnerNames(rows.map((row) => row.user_id));
   const results: BatchResult[] = [];
 
@@ -67,7 +94,7 @@ export async function runCompetitorPriceBatch(input: {
     results.push(result);
 
     if (rows.indexOf(row) < rows.length - 1) {
-      await delay(1200);
+      await delay(getBatchDelayMs());
     }
   }
 
@@ -154,6 +181,21 @@ async function checkAndSaveProduct(row: CompetitorPriceProductRow, ownerName: st
 function clampBatchLimit(limit: number | undefined) {
   if (!limit || !Number.isFinite(limit)) return 25;
   return Math.max(1, Math.min(Math.floor(limit), MAX_BATCH_LIMIT));
+}
+
+function normalizeProductIds(productIds: string[] | undefined) {
+  return [...new Set((productIds ?? []).map((id) => id.trim()).filter(Boolean))];
+}
+
+function orderRowsByProductIds(rows: CompetitorPriceProductRow[], productIds: string[]) {
+  if (!productIds.length) return rows;
+
+  const orderMap = new Map(productIds.map((id, index) => [id, index]));
+  return [...rows].sort((left, right) => (orderMap.get(left.id) ?? 0) - (orderMap.get(right.id) ?? 0));
+}
+
+function getBatchDelayMs() {
+  return MIN_BATCH_DELAY_MS + Math.floor(Math.random() * (MAX_BATCH_DELAY_MS - MIN_BATCH_DELAY_MS + 1));
 }
 
 function delay(ms: number) {

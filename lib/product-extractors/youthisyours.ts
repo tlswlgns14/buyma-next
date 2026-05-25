@@ -433,7 +433,8 @@ function cleanSizeName(value: string) {
   const size = cleanText(value)
     .replace(/^[\s:|/-]+|[\s:|/-]+$/g, "")
     .toUpperCase();
-  if (/^(?:ONE|ONE SIZE|ONESIZE|FREE SIZE|FREE-SIZE)$/.test(size)) return "FREE";
+  const compact = size.replace(/[\s-]+/g, "");
+  if (/^(?:OS|O\/S|ONE|ONESIZE|ONE\(SIZE\)|OS\(ONESIZE\)|O\/S\(ONESIZE\)|FREE|FREESIZE|FREE\(SIZE\)|FREE\(ONESIZE\))$/.test(compact)) return "FREE";
   return size;
 }
 

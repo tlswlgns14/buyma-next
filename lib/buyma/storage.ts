@@ -2,7 +2,6 @@ import {
   BUYMA_SHIPPING_METHODS_VERSION,
   BUYMA_STORAGE_KEYS,
   DEFAULT_BUYMA_SETTINGS,
-  DEFAULT_BUYMA_SHIPPING_METHODS,
 } from "./data";
 import type { BuymaSettings, BuymaShippingMethod } from "./types";
 
@@ -11,8 +10,17 @@ export function clearStoredProducts() {
   window.localStorage.removeItem(BUYMA_STORAGE_KEYS.products);
 }
 
+export function clearStoredSettings() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(BUYMA_STORAGE_KEYS.settings);
+}
+
 export function loadStoredSettings() {
   const storedSettings = readJson<Partial<BuymaSettings>>(BUYMA_STORAGE_KEYS.settings, {});
+  return normalizeBuymaSettings(storedSettings);
+}
+
+export function normalizeBuymaSettings(storedSettings: Partial<BuymaSettings>) {
   const settings = {
     ...DEFAULT_BUYMA_SETTINGS,
     ...storedSettings,
@@ -27,10 +35,7 @@ export function loadStoredSettings() {
 
   return {
     ...settings,
-    shippingMethods: mergeShippingMethods([
-      ...DEFAULT_BUYMA_SHIPPING_METHODS,
-      ...(storedSettings.shippingMethods ?? []),
-    ]),
+    shippingMethods: mergeShippingMethods(storedSettings.shippingMethods ?? []),
     shippingMethodsInitialized: true,
     shippingMethodsVersion: BUYMA_SHIPPING_METHODS_VERSION,
   };

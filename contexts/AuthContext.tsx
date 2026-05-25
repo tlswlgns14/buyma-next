@@ -21,6 +21,7 @@ export type AppUser = {
   approval_status: "pending" | "approved" | "rejected";
   approved_at: string | null;
   access_expires_at: string;
+  can_use_competitor_prices: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -51,7 +52,7 @@ async function fetchAppUser(userId: string) {
   const { data, error } = await supabase
     .from("users")
     .select(
-      "id,email,username,phone,approval_status,approved_at,access_expires_at,created_at,updated_at",
+      "id,email,username,phone,approval_status,approved_at,access_expires_at,can_use_competitor_prices,created_at,updated_at",
     )
     .eq("id", userId)
     .maybeSingle();

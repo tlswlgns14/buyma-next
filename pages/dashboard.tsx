@@ -7,7 +7,11 @@ import ProductManager from "@/components/ProductManager";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatAccessDate, isAccessExpired } from "@/lib/access";
 
-type DashboardMenuKey = "product-management" | "competitor-prices" | "sourcing-sites";
+type DashboardMenuKey =
+  | "product-management"
+  | "competitor-prices"
+  | "sourcing-sites"
+  | "image-server-guide";
 
 type DashboardMenu = {
   key: DashboardMenuKey;
@@ -30,6 +34,11 @@ const dashboardMenus: DashboardMenu[] = [
     key: "sourcing-sites",
     label: "소싱사이트내역",
     title: "소싱사이트내역",
+  },
+  {
+    key: "image-server-guide",
+    label: "이미지 서버 설정가이드",
+    title: "이미지 서버 설정가이드",
   },
 ];
 
@@ -105,7 +114,17 @@ export default function Dashboard() {
   const router = useRouter();
   const displayName = getDisplayName(user?.username, authUser?.user_metadata);
   const weekRange = getCurrentWeekRange();
-  const activeMenuItem = dashboardMenus.find((menu) => menu.key === activeMenu);
+  const canUseCompetitorPrices = Boolean(user?.can_use_competitor_prices);
+  const visibleDashboardMenus = canUseCompetitorPrices
+    ? dashboardMenus
+    : dashboardMenus.filter((menu) => menu.key !== "competitor-prices");
+  const effectiveActiveMenu =
+    !canUseCompetitorPrices && activeMenu === "competitor-prices"
+      ? "product-management"
+      : activeMenu;
+  const activeMenuItem = visibleDashboardMenus.find(
+    (menu) => menu.key === effectiveActiveMenu,
+  );
   const approvalStatus = user?.approval_status ?? "pending";
   const accessExpired = isAccessExpired(user?.access_expires_at);
   const accessExpiresDate = formatAccessDate(user?.access_expires_at);
@@ -202,13 +221,13 @@ export default function Dashboard() {
         </div>
 
         <nav aria-label="Dashboard navigation" className="grid gap-2 px-4 py-6">
-          {dashboardMenus.map((menu) => (
+          {visibleDashboardMenus.map((menu) => (
             <button
               key={menu.key}
               type="button"
               onClick={() => setActiveMenu(menu.key)}
               className={`flex min-h-11 w-full items-center rounded-lg px-4 text-left text-sm font-extrabold transition ${
-                activeMenu === menu.key
+                effectiveActiveMenu === menu.key
                   ? "bg-[#151515] text-white"
                   : "bg-white text-[#151515] hover:bg-black/[0.04]"
               }`}
@@ -267,24 +286,107 @@ export default function Dashboard() {
             </h1>
           </div>
 
-          {renderDashboardContent(activeMenu)}
+          {renderDashboardContent(effectiveActiveMenu, canUseCompetitorPrices)}
         </section>
       </div>
     </main>
   );
 }
 
-function renderDashboardContent(activeMenu: DashboardMenuKey) {
+function renderDashboardContent(
+  activeMenu: DashboardMenuKey,
+  canUseCompetitorPrices: boolean,
+) {
   switch (activeMenu) {
     case "product-management":
       return <ProductManager />;
     case "competitor-prices":
-      return <CompetitorPriceChecker />;
+      return canUseCompetitorPrices ? <CompetitorPriceChecker /> : null;
     case "sourcing-sites":
       return <SourcingSitesPanel />;
+    case "image-server-guide":
+      return <ImageServerGuidePanel />;
     default:
       return null;
   }
+}
+
+function ImageServerGuidePanel() {
+  return (
+    <section className="grid gap-4">
+      <div className="rounded-lg border border-black/10 bg-white p-5 shadow-[0_12px_32px_rgba(61,48,35,0.08)]">
+        <div className="border-b border-black/10 pb-4">
+          <h2 className="text-lg font-extrabold text-[#151515]">
+            이미지 서버 설정 순서
+          </h2>
+          <p className="mt-1 text-sm font-semibold text-[#6c655b]">
+            상품관리 설정 탭의 이미지 서버 설정에 아래 값을 입력한 뒤 연결 테스트를 진행하세요.
+          </p>
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          <article className="rounded-lg border border-black/10 bg-[#fbfaf7] p-4">
+            <h3 className="text-base font-extrabold text-[#151515]">
+              1. imgBB API Key 입력
+            </h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-[#6c655b]">
+              imgBB 계정에서 API Key를 발급받아 상품관리의 imgBB API Key 칸에 입력합니다.
+            </p>
+          </article>
+
+          <article className="rounded-lg border border-black/10 bg-[#fbfaf7] p-4">
+            <h3 className="text-base font-extrabold text-[#151515]">
+              2. Worker URL 입력
+            </h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-[#6c655b]">
+              Cloudflare Worker 배포 주소를 Worker URL에 입력합니다. 예시는
+              {" "}
+              <span className="font-mono text-[#2f3742]">
+                https://buyma-image-worker.your-account.workers.dev
+              </span>
+              입니다.
+            </p>
+          </article>
+
+          <article className="rounded-lg border border-black/10 bg-[#fbfaf7] p-4">
+            <h3 className="text-base font-extrabold text-[#151515]">
+              3. Worker API Key 입력
+            </h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-[#6c655b]">
+              Worker에서 검사하는 API Key와 상품관리 화면의 Worker API Key 값이 같아야 합니다.
+            </p>
+          </article>
+
+          <article className="rounded-lg border border-black/10 bg-[#fbfaf7] p-4">
+            <h3 className="text-base font-extrabold text-[#151515]">
+              4. 이미지 업로드 사용 체크
+            </h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-[#6c655b]">
+              이미지 업로드 사용을 체크하면 CSV 생성 전에 이미지 URL을 서버 업로드 URL로 교체합니다.
+            </p>
+          </article>
+
+          <article className="rounded-lg border border-black/10 bg-[#fbfaf7] p-4">
+            <h3 className="text-base font-extrabold text-[#151515]">
+              5. 이미지 서버 연결 테스트 실행
+            </h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-[#6c655b]">
+              연결 테스트에서 Worker 상태, Worker API Key, imgBB API Key 확인이 모두 통과해야 실제 업로드에 사용할 수 있습니다.
+            </p>
+          </article>
+        </div>
+
+        <div className="mt-5 rounded-lg border border-[#2d73ff]/20 bg-[#f4f7ff] p-4">
+          <h3 className="text-base font-extrabold text-[#151515]">
+            계정별 설정
+          </h3>
+          <p className="mt-2 text-sm font-semibold leading-6 text-[#476072]">
+            이미지 서버 설정값은 계정별로 저장됩니다. 다른 계정에서도 이미지 업로드를 사용하려면 그 계정으로 로그인해서 같은 값을 저장해야 합니다.
+          </p>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function SourcingSitesPanel() {

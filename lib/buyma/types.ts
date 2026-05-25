@@ -15,6 +15,8 @@ export type ProductDraft = {
   referencePrice?: number;
   sellingPrice?: number;
   category?: string;
+  menCategory?: string;
+  womenCategory?: string;
   season?: string;
   theme?: string;
   unisex?: boolean;

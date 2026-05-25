@@ -450,7 +450,9 @@ function normalizeColorName(value: string) {
 }
 
 function cleanSizeName(value: string) {
-  return cleanText(decodeHtmlEntities(value)).replace(/\s+/g, "");
+  const size = cleanText(decodeHtmlEntities(value)).toUpperCase().replace(/\s+/g, "");
+  if (/^(?:OS|O\/S|ONE|ONESIZE|ONE\(SIZE\)|OS\(ONESIZE\)|O\/S\(ONESIZE\)|FREE|FREESIZE|FREE\(SIZE\)|FREE\(ONESIZE\))$/.test(size)) return "FREE";
+  return size;
 }
 
 function isLikelySizeName(value: string) {

@@ -513,7 +513,12 @@ function cleanPageTitle(value: unknown) {
 }
 
 function cleanSizeName(value: string) {
-  return cleanText(value).replace(/\s+/g, "");
+  const size = cleanText(value)
+    .toUpperCase()
+    .replace(/\s+/g, "")
+    .replace(/-/g, "");
+  if (/^(?:OS|O\/S|ONE|ONESIZE|ONE\(SIZE\)|OS\(ONESIZE\)|O\/S\(ONESIZE\)|FREE|FREESIZE|FREE\(SIZE\)|FREE\(ONESIZE\))$/.test(size)) return "FREE";
+  return size;
 }
 
 function isLikelySizeName(value: string) {

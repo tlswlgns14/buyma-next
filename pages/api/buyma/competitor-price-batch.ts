@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
 import { runCompetitorPriceBatch } from "@/lib/buyma/competitor-price-job";
+import { canUseCompetitorPrices } from "@/lib/competitor-price-access";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
 
 type BatchResponse =
@@ -33,10 +34,18 @@ export default async function handler(
       return res.status(401).json({ ok: false, error: "로그인이 필요합니다." });
     }
 
+    if (!(await canUseCompetitorPrices(supabase, data.user.id))) {
+      return res.status(403).json({ ok: false, error: "No competitor price access." });
+    }
+
     const limit = typeof req.body?.limit === "number" ? req.body.limit : undefined;
+    const productIds = Array.isArray(req.body?.ids)
+      ? req.body.ids.filter((id): id is string => typeof id === "string")
+      : undefined;
     const result = await runCompetitorPriceBatch({
       userId: data.user.id,
       limit,
+      productIds,
     });
 
     return res.status(200).json({

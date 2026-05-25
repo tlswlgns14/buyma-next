@@ -2,6 +2,7 @@ import { MEASUREMENT_HEADERS } from "./data";
 import { BUYMA_SIZES, BUYMA_SIZE_DETAILS } from "./id-data";
 import { findBuymaBrand } from "./brands";
 import { getJapaneseBrandDescription } from "./brand-descriptions";
+import { resolveUnisexBuymaCategories } from "./categories";
 import type { BuymaDescriptionPlacement, BuymaSettings, ColorSizeRow, CsvBundle, ProductDraft, StockStatus } from "./types";
 import {
   calculateSellingPrice,
@@ -18,9 +19,7 @@ import {
 
 const DEFAULT_KOREA_AREA_CODE = "2002003";
 const DEFAULT_SEOUL_CITY_CODE = "001";
-const DEFAULT_SHIPPING_METHOD_ID = "1064891";
 const DEFAULT_SHOP_NAME = "公式オンラインショップ";
-const SHIPPING_METHOD_IDS = new Set(["1064891", "1072560"]);
 
 const ITEMS_HEADERS = [
   "商品ID",
@@ -143,9 +142,53 @@ export function generateBuymaCsvBundle(
   products: ProductDraft[],
   settings: BuymaSettings,
 ): CsvBundle {
+  const productsWithSku = expandBuymaCsvProducts(products).map((product, index) => ({
+    ...product,
+    skuNumber: product.skuNumber || makeSku(index, product.productCode),
+  }));
+
   return {
-    itemsCsv: generateItemsCsv(products, settings),
-    colorSizesCsv: generateColorSizesCsv(products, settings),
+    itemsCsv: generateItemsCsv(productsWithSku, settings),
+    colorSizesCsv: generateColorSizesCsv(productsWithSku, settings),
+  };
+}
+
+export function getBuymaCsvProductSourceIndexes(products: ProductDraft[]) {
+  return products.flatMap((product, index) =>
+    shouldExpandUnisexProduct(product) ? [index, index] : [index],
+  );
+}
+
+function expandBuymaCsvProducts(products: ProductDraft[]) {
+  return products.flatMap((product, index) => {
+    if (!shouldExpandUnisexProduct(product)) return [product];
+
+    const { menCategory, womenCategory } = resolveUnisexBuymaCategories(product);
+    const baseSku = product.skuNumber || makeSku(index, product.productCode);
+
+    return [
+      makeUnisexCsvProduct(product, menCategory, `${baseSku}-M`),
+      makeUnisexCsvProduct(product, womenCategory, `${baseSku}-W`),
+    ];
+  });
+}
+
+function shouldExpandUnisexProduct(product: ProductDraft) {
+  if (!product.unisex) return false;
+
+  const { menCategory, womenCategory } = resolveUnisexBuymaCategories(product);
+  return Boolean(menCategory && womenCategory);
+}
+
+function makeUnisexCsvProduct(product: ProductDraft, category: string, skuNumber: string): ProductDraft {
+  return {
+    ...product,
+    category,
+    skuNumber,
+    sizeTableData: product.sizeTableData?.map((row) => ({
+      ...row,
+      sizeTypeId: "",
+    })),
   };
 }
 
@@ -282,7 +325,7 @@ export function generateColorSizesCsv(products: ProductDraft[], settings: BuymaS
       colorSortMap.set(colorName, sortOrder + 1);
 
       const sizeLabel = cleanText(row.size).toUpperCase() || "FREE";
-      const searchSizeId = row.sizeTypeId || resolveSizeTypeId(product.category, row.size) || "0";
+      const searchSizeId = row.sizeTypeId || resolveSizeTypeId(product.category, row.size);
 
       rows.push([
         product.buymaProductId || "",
@@ -314,7 +357,7 @@ function resolveSellingPrice(product: ProductDraft, settings: BuymaSettings) {
 
 function resolveAreaCode(value: unknown) {
   const text = cleanText(value);
-  if (!text || text === "韓国" || text === DEFAULT_SHIPPING_METHOD_ID) return DEFAULT_KOREA_AREA_CODE;
+  if (!text || text === "韓国") return DEFAULT_KOREA_AREA_CODE;
   return text;
 }
 
@@ -328,11 +371,13 @@ function resolveCityCode(value: unknown) {
 function resolveShippingMethod(value: unknown, settings: BuymaSettings) {
   const text = cleanText(value);
   const shippingMethodId = text.replace(/^J/i, "");
-  return getConfiguredShippingMethodIds(settings).has(shippingMethodId) ? shippingMethodId : DEFAULT_SHIPPING_METHOD_ID;
+  const configuredIds = getConfiguredShippingMethodIds(settings);
+  if (configuredIds.has(shippingMethodId)) return shippingMethodId;
+  return configuredIds.values().next().value ?? "";
 }
 
 function getConfiguredShippingMethodIds(settings: BuymaSettings) {
-  const ids = new Set(SHIPPING_METHOD_IDS);
+  const ids = new Set<string>();
   (settings.shippingMethods ?? []).forEach((method) => {
     const id = cleanText(method.id).replace(/^J/i, "");
     if (id) ids.add(id);
