@@ -39,9 +39,7 @@ export default async function handler(
     }
 
     const limit = typeof req.body?.limit === "number" ? req.body.limit : undefined;
-    const productIds = Array.isArray(req.body?.ids)
-      ? req.body.ids.filter((id): id is string => typeof id === "string")
-      : undefined;
+    const productIds = getProductIds(req.body);
     const result = await runCompetitorPriceBatch({
       userId: data.user.id,
       limit,
@@ -65,4 +63,11 @@ function getBearerToken(req: NextApiRequest) {
 
   const match = header.match(/^Bearer\s+(.+)$/i);
   return match?.[1]?.trim() ?? "";
+}
+
+function getProductIds(body: unknown) {
+  if (!body || typeof body !== "object" || !("ids" in body)) return undefined;
+
+  const ids = (body as { ids?: unknown }).ids;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : undefined;
 }
