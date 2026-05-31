@@ -15,6 +15,7 @@ type SortMode = "action" | "csv" | "csvReverse" | "unchecked" | "oldestChecked" 
 type ProductFilterMode = "all" | "unchecked" | "checked" | "lower" | "noLower" | "error" | "empty" | "missing";
 type ManualReviewFilterMode = "all" | "pending" | "reviewed" | "recheck";
 type ManualReviewSortMode = "csv" | "csvReverse" | "title" | "oldestReviewed";
+type CompetitorPageSize = 10 | 30 | 50 | 100 | 300 | 500 | "all";
 type ManualReviewListPageSize = 10 | 30 | 50 | 100 | 300 | 500 | "all";
 type ManualReviewStatus = "pending" | "reviewed" | "recheck";
 
@@ -101,7 +102,7 @@ type CsvImportFailure = {
 
 const DEFAULT_OWNER_NAME = "sonokoro";
 const BATCH_LIMIT = 50;
-const PAGE_SIZE_OPTIONS = [10, 30, 50, 100, 500] as const;
+const PAGE_SIZE_OPTIONS = [10, 30, 50, 100, 300, 500, "all"] as const;
 const UNCHECKED_MAX_PAGE_SIZE = 50;
 const PRODUCT_SELECT_COLUMNS =
   "id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,status,last_checked_at,last_search_url,reference_price,lower_competitors,last_results,error,created_at,csv_order,csv_imported_at";
@@ -125,7 +126,7 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
   const [checkingBatch, setCheckingBatch] = useState(false);
   const [trackingLoaded, setTrackingLoaded] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("csvReverse");
-  const [pageSize, setPageSize] = useState<number>(50);
+  const [pageSize, setPageSize] = useState<CompetitorPageSize>(50);
   const [currentPage, setCurrentPage] = useState(1);
   const [filterMode, setFilterMode] = useState<ProductFilterMode>("all");
   const [manualReviewFilterMode, setManualReviewFilterMode] = useState<ManualReviewFilterMode>("all");
@@ -150,6 +151,7 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
   const [manualReviewedAt, setManualReviewedAt] = useState<Record<string, string>>({});
   const [manualRecheckIds, setManualRecheckIds] = useState<Set<string>>(() => new Set());
   const [manualRecheckRequestedAt, setManualRecheckRequestedAt] = useState<Record<string, string>>({});
+  const [selectedManualReviewProductIds, setSelectedManualReviewProductIds] = useState<Set<string>>(() => new Set());
   const [csvImportFailures, setCsvImportFailures] = useState<CsvImportFailure[]>([]);
 
   const activeProducts = useMemo(
@@ -172,14 +174,27 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
     () => sortTrackedProducts(visibleProducts, sortMode),
     [sortMode, visibleProducts],
   );
-  const totalPages = Math.max(1, Math.ceil(sortedProducts.length / pageSize));
+  const totalPages =
+    pageSize === "all"
+      ? 1
+      : Math.max(1, Math.ceil(sortedProducts.length / pageSize));
   const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
   const currentPageProducts = useMemo(
-    () => sortedProducts.slice((safeCurrentPage - 1) * pageSize, safeCurrentPage * pageSize),
+    () => {
+      if (pageSize === "all") return sortedProducts;
+      return sortedProducts.slice((safeCurrentPage - 1) * pageSize, safeCurrentPage * pageSize);
+    },
     [pageSize, safeCurrentPage, sortedProducts],
   );
-  const pageStart = sortedProducts.length ? (safeCurrentPage - 1) * pageSize + 1 : 0;
-  const pageEnd = Math.min(safeCurrentPage * pageSize, sortedProducts.length);
+  const pageStart = sortedProducts.length
+    ? pageSize === "all"
+      ? 1
+      : (safeCurrentPage - 1) * pageSize + 1
+    : 0;
+  const pageEnd =
+    pageSize === "all"
+      ? sortedProducts.length
+      : Math.min(safeCurrentPage * pageSize, sortedProducts.length);
   const selectedProducts = useMemo(
     () => products.filter((product) => selectedProductIds.has(product.id)),
     [products, selectedProductIds],
@@ -210,18 +225,6 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
     () => filterManualReviewProducts(manualReviewBaseProducts, manualReviewFilterMode, manualReviewedIds, manualRecheckIds),
     [manualRecheckIds, manualReviewBaseProducts, manualReviewFilterMode, manualReviewedIds],
   );
-  const manualReviewCurrentCsvProducts = useMemo(
-    () => manualReviewProducts.filter((product) => manualReviewedIds.has(product.id)),
-    [manualReviewProducts, manualReviewedIds],
-  );
-  const manualReviewCurrentCsvCount = useMemo(
-    () => countPriceUpdateCsvRows(manualReviewCurrentCsvProducts, manualPriceEdits, true),
-    [manualPriceEdits, manualReviewCurrentCsvProducts],
-  );
-  const manualReviewAllCsvCount = useMemo(
-    () => countPriceUpdateCsvRows(manualReviewedProducts, manualPriceEdits, true),
-    [manualPriceEdits, manualReviewedProducts],
-  );
   const manualReviewIndex = manualReviewProducts.findIndex((product) => product.id === manualReviewProductId);
   const manualReviewProduct = manualReviewIndex >= 0 ? manualReviewProducts[manualReviewIndex] : manualReviewProducts[0];
   const manualReviewPosition = manualReviewProduct
@@ -246,6 +249,20 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
     manualReviewListPageSize === "all"
       ? manualReviewProducts.length
       : Math.min(safeManualReviewListPage * manualReviewListPageSize, manualReviewProducts.length);
+  const selectedManualReviewProducts = useMemo(
+    () => manualReviewSourceProducts.filter((product) => selectedManualReviewProductIds.has(product.id)),
+    [manualReviewSourceProducts, selectedManualReviewProductIds],
+  );
+  const selectedManualReviewReviewedProducts = useMemo(
+    () => selectedManualReviewProducts.filter((product) => manualReviewedIds.has(product.id)),
+    [manualReviewedIds, selectedManualReviewProducts],
+  );
+  const manualReviewSelectedCsvCount = useMemo(
+    () => countPriceUpdateCsvRows(selectedManualReviewReviewedProducts, manualPriceEdits, true),
+    [manualPriceEdits, selectedManualReviewReviewedProducts],
+  );
+  const manualReviewListSelectedCount = manualReviewListProducts.filter((product) => selectedManualReviewProductIds.has(product.id)).length;
+  const isManualReviewCurrentPageAllSelected = Boolean(manualReviewListProducts.length) && manualReviewListSelectedCount === manualReviewListProducts.length;
   const manualReviewLowestPrice = manualReviewProduct ? manualLowestPrices[manualReviewProduct.id] ?? "" : "";
   const manualReviewSuggestedPrice = manualReviewProduct
     ? getManualReviewPriceEditValue(manualReviewProduct, manualPriceEdits)
@@ -276,6 +293,10 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
     setSelectedProductIds(new Set());
   }
 
+  function resetManualReviewSelectionForListChange() {
+    setSelectedManualReviewProductIds(new Set());
+  }
+
   const applyManualReviewRows = useCallback((rows: ManualPriceReviewItemRow[], batch?: ManualPriceReviewBatchRow | null) => {
     const products = rows.map(manualReviewRowToProduct);
     setManualReviewImportedProducts(products);
@@ -289,6 +310,7 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
     setManualReviewedAt(getManualDateMap(rows, "reviewed_at"));
     setManualRecheckIds(getManualStatusIds(rows, "recheck"));
     setManualRecheckRequestedAt(getManualDateMap(rows, "recheck_requested_at"));
+    setSelectedManualReviewProductIds(new Set());
     setManualReviewListPage(1);
   }, []);
 
@@ -872,6 +894,32 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
     });
   }
 
+  function toggleManualReviewSelection(id: string, checked: boolean) {
+    setSelectedManualReviewProductIds((current) => {
+      const next = new Set(current);
+      if (checked) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleCurrentManualReviewPageSelection(checked: boolean) {
+    setSelectedManualReviewProductIds((current) => {
+      const next = new Set(current);
+      manualReviewListProducts.forEach((product) => {
+        if (checked) {
+          next.add(product.id);
+        } else {
+          next.delete(product.id);
+        }
+      });
+      return next;
+    });
+  }
+
   async function updateManualPriceEdit(productId: string, value: string) {
     const numericValue = value.replace(/[^\d]/g, "");
     const previousValue = manualPriceEdits[productId];
@@ -943,23 +991,11 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
 
   function downloadManualReviewCsv() {
     downloadPriceUpdateCsvForTargets({
-      targets: manualReviewedProducts,
-      emptyMessage: "수동 검토 완료 상품이 없습니다. 가격을 확인한 뒤 완료 처리해 주세요.",
+      targets: selectedManualReviewReviewedProducts,
+      candidateCount: selectedManualReviewProducts.length,
+      emptyMessage: "선택한 상품 중 검토완료 상품이 없습니다.",
       editedPrices: manualPriceEdits,
-      scopeLabel: "전체 검토완료 기준",
-      reviewOnly: true,
-      requirePriceChange: true,
-      onDownloaded: markManualReviewExported,
-    });
-  }
-
-  function downloadCurrentManualReviewCsv() {
-    downloadPriceUpdateCsvForTargets({
-      targets: manualReviewCurrentCsvProducts,
-      candidateCount: manualReviewProducts.length,
-      emptyMessage: "현재 보기 안에 검토완료 상품이 없습니다.",
-      editedPrices: manualPriceEdits,
-      scopeLabel: "현재 보기 기준",
+      scopeLabel: "선택한 검토완료 기준",
       reviewOnly: true,
       requirePriceChange: true,
       onDownloaded: markManualReviewExported,
@@ -1194,108 +1230,60 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
   if (isManualReviewMode) {
     return (
       <div className="grid gap-5">
-        <div className="flex flex-wrap justify-end gap-2">
-          <input
-            ref={manualReviewFileInputRef}
-            type="file"
-            accept=".csv,.tsv,.txt"
-            onChange={(event) => void handleManualReviewFileChange(event)}
-            className="sr-only"
-          />
-          <button
-            type="button"
-            disabled={!trackingLoaded || manualReviewUploading}
-            onClick={() => {
-              if (manualReviewFileInputRef.current) {
-                manualReviewFileInputRef.current.value = "";
-                manualReviewFileInputRef.current.click();
-              }
-            }}
-            className="inline-flex min-h-10 items-center justify-center rounded-lg bg-[#151515] px-4 text-sm font-extrabold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {manualReviewUploading ? "업로드 중" : "BUYMA CSV 업로드"}
-          </button>
-          <button
-            type="button"
-            disabled={!manualReviewSourceProducts.length}
-            onClick={() => void removeAllManualReviewProducts()}
-            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#c43b2f]/25 bg-white px-4 text-sm font-extrabold text-[#c43b2f] transition hover:border-[#c43b2f] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            전체 삭제
-          </button>
-        </div>
-        <section className="grid gap-4 rounded-lg border border-black/10 bg-white p-4 shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-              <div className="grid gap-2 text-xs font-extrabold text-[#6c655b]">
-                <div className="flex flex-wrap gap-2">
-                  <span className="rounded-full bg-[#eef3ff] px-3 py-1.5 text-[#2d73ff]">
-                    현재 보기 {manualReviewProducts.length.toLocaleString()}개
-                  </span>
-                  <span className="rounded-full bg-[#e9f8ef] px-3 py-1.5 text-[#24784c]">
-                    전체 검토완료 {manualReviewedProducts.length.toLocaleString()}개
-                  </span>
-                  <span className="rounded-full bg-[#f1eee6] px-3 py-1.5 text-[#6c655b]">
-                    전체 검토대기 {manualRemainingProducts.length.toLocaleString()}개
-                  </span>
-                  <span className="rounded-full bg-[#fff6e8] px-3 py-1.5 text-[#9a5c00]">
-                    재검토 필요 {manualRecheckProducts.length.toLocaleString()}개
-                  </span>
-                </div>
-                {manualReviewBatchLabel ? (
-                  <span className="w-fit rounded-full bg-[#fbfaf7] px-3 py-1.5">
-                    현재 묶음 {manualReviewBatchLabel}
-                  </span>
-                ) : null}
-              </div>
-              <div className="flex flex-wrap items-end gap-2">
-                <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-filter-mode">
-                보기
-                <select
-                  id="manual-review-filter-mode"
-                  value={manualReviewFilterMode}
-                  onChange={(event) => {
-                    setManualReviewFilterMode(event.target.value as ManualReviewFilterMode);
-                    setManualReviewListPage(1);
-                  }}
-                  className="min-h-10 min-w-[140px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
-                >
-                  <option value="all">전체</option>
-                  <option value="pending">검토대기</option>
-                  <option value="reviewed">검토완료</option>
-                  <option value="recheck">재검토 필요</option>
-                </select>
-              </label>
-              <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-sort-mode">
-                정렬
-                <select
-                  id="manual-review-sort-mode"
-                  value={manualReviewSortMode}
-                  onChange={(event) => {
-                    setManualReviewSortMode(event.target.value as ManualReviewSortMode);
-                    setManualReviewProductId("");
-                    setManualReviewListPage(1);
-                  }}
-                  className="min-h-10 min-w-[140px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
-                >
-                  <option value="csv">CSV 순서</option>
-                  <option value="csvReverse">CSV 역순</option>
-                  <option value="title">상품명순</option>
-                  <option value="oldestReviewed">검토완료일 오래된순</option>
-                </select>
-              </label>
-              <label className="grid min-w-[220px] gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-product-search">
-                검색
-                <input
-                  id="manual-review-product-search"
-                  value={manualReviewProductSearch}
-                  onChange={(event) => {
-                    setManualReviewProductSearch(event.target.value);
-                    setManualReviewListPage(1);
-                  }}
-                  placeholder="상품명 또는 상품번호 검색"
-                  className="min-h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition placeholder:text-[#9a9388] focus:border-[#2d73ff]"
-                />
-              </label>
+        <section className="rounded-lg border border-black/10 bg-white p-4 shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
+          <div className="rounded-lg border border-black/10 bg-[#fbfaf7] p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={manualReviewFileInputRef}
+                type="file"
+                accept=".csv,.tsv,.txt"
+                onChange={(event) => void handleManualReviewFileChange(event)}
+                className="sr-only"
+              />
+              <button
+                type="button"
+                disabled={!trackingLoaded || manualReviewUploading}
+                onClick={() => {
+                  if (manualReviewFileInputRef.current) {
+                    manualReviewFileInputRef.current.value = "";
+                    manualReviewFileInputRef.current.click();
+                  }
+                }}
+                className="inline-flex min-h-11 items-center justify-center rounded-lg bg-[#151515] px-4 text-sm font-extrabold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {manualReviewUploading ? "업로드 중" : "BUYMA CSV 업로드"}
+              </button>
+              <button
+                type="button"
+                disabled={!manualReviewSourceProducts.length}
+                onClick={() => void removeAllManualReviewProducts()}
+                className="inline-flex min-h-11 items-center justify-center rounded-lg border border-[#c43b2f]/25 bg-white px-4 text-sm font-extrabold text-[#c43b2f] transition hover:border-[#c43b2f] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                전체 삭제
+              </button>
+            </div>
+
+            <p className="mt-4 text-xs font-bold leading-5 text-[#6c655b]">
+              BUYMA CSV 파일만 업로드할 수 있습니다. 업로드가 실패하면 기존 목록은 변경하지 않습니다.
+            </p>
+            {manualReviewBatchLabel ? (
+              <p className="mt-3 text-xs font-extrabold text-[#6c655b]">
+                현재 묶음 {manualReviewBatchLabel}
+              </p>
+            ) : null}
+            <div className="mt-4 flex flex-wrap gap-2 text-xs font-extrabold text-[#6c655b]">
+              <span className="rounded-full bg-[#eef3ff] px-3 py-1.5 text-[#2d73ff]">
+                현재 보기 {manualReviewProducts.length.toLocaleString()}개
+              </span>
+              <span className="rounded-full bg-[#e9f8ef] px-3 py-1.5 text-[#24784c]">
+                전체 검토완료 {manualReviewedProducts.length.toLocaleString()}개
+              </span>
+              <span className="rounded-full bg-white px-3 py-1.5">
+                전체 검토대기 {manualRemainingProducts.length.toLocaleString()}개
+              </span>
+              <span className="rounded-full bg-[#fff6e8] px-3 py-1.5 text-[#9a5c00]">
+                재검토 필요 {manualRecheckProducts.length.toLocaleString()}개
+              </span>
             </div>
           </div>
         </section>
@@ -1304,27 +1292,6 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-extrabold text-[#151515]">현재 작업상품</h2>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <div className="flex min-h-10 items-center rounded-lg border border-[#2d73ff]/20 bg-[#eef3ff] px-3 text-xs font-extrabold text-[#2d73ff]">
-                가격이 변경된 검토완료 상품만 CSV에 포함됩니다.
-              </div>
-              <button
-                type="button"
-                disabled={!manualReviewCurrentCsvCount}
-                onClick={downloadCurrentManualReviewCsv}
-                className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2d73ff]/25 bg-white px-4 text-sm font-extrabold text-[#2d73ff] transition hover:border-[#2d73ff] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                현재 보기 CSV {manualReviewCurrentCsvCount.toLocaleString()}개
-              </button>
-              <button
-                type="button"
-                disabled={!manualReviewAllCsvCount}
-                onClick={downloadManualReviewCsv}
-                className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2f9d62]/25 bg-white px-4 text-sm font-extrabold text-[#24784c] transition hover:border-[#2f9d62] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                검토완료 전체 CSV {manualReviewAllCsvCount.toLocaleString()}개
-              </button>
             </div>
           </div>
 
@@ -1463,6 +1430,104 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
           )}
         </section>
 
+        <section className="grid gap-3 rounded-lg border border-black/10 bg-white p-3 shadow-[0_10px_32px_rgba(61,48,35,0.06)]">
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-filter-mode">
+              보기
+              <select
+                id="manual-review-filter-mode"
+                value={manualReviewFilterMode}
+                onChange={(event) => {
+                  setManualReviewFilterMode(event.target.value as ManualReviewFilterMode);
+                  resetManualReviewSelectionForListChange();
+                  setManualReviewListPage(1);
+                }}
+                className="min-h-10 min-w-[140px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+              >
+                <option value="all">전체</option>
+                <option value="pending">검토대기</option>
+                <option value="reviewed">검토완료</option>
+                <option value="recheck">재검토 필요</option>
+              </select>
+            </label>
+            <label className="grid min-w-[220px] flex-1 gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-product-search">
+              검색
+              <input
+                id="manual-review-product-search"
+                value={manualReviewProductSearch}
+                onChange={(event) => {
+                  setManualReviewProductSearch(event.target.value);
+                  resetManualReviewSelectionForListChange();
+                  setManualReviewListPage(1);
+                }}
+                placeholder="상품명 또는 상품번호 검색"
+                className="min-h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition placeholder:text-[#9a9388] focus:border-[#2d73ff]"
+              />
+            </label>
+          </div>
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-sort-mode">
+                정렬
+                <select
+                  id="manual-review-sort-mode"
+                  value={manualReviewSortMode}
+                  onChange={(event) => {
+                    setManualReviewSortMode(event.target.value as ManualReviewSortMode);
+                    setManualReviewProductId("");
+                    resetManualReviewSelectionForListChange();
+                    setManualReviewListPage(1);
+                  }}
+                  className="min-h-10 min-w-[140px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+                >
+                  <option value="csv">CSV 순서</option>
+                  <option value="csvReverse">CSV 역순</option>
+                  <option value="title">상품명순</option>
+                  <option value="oldestReviewed">검토완료일 오래된순</option>
+                </select>
+              </label>
+              <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-page-size">
+                표시
+                <select
+                  id="manual-review-page-size"
+                  value={String(manualReviewListPageSize)}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setManualReviewListPageSize(value === "all" ? "all" : (Number(value) as ManualReviewListPageSize));
+                    resetManualReviewSelectionForListChange();
+                    setManualReviewListPage(1);
+                  }}
+                  className="min-h-10 min-w-[110px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+                >
+                  <option value="10">10개 보기</option>
+                  <option value="30">30개 보기</option>
+                  <option value="50">50개 보기</option>
+                  <option value="100">100개 보기</option>
+                  <option value="300">300개 보기</option>
+                  <option value="500">500개 보기</option>
+                  <option value="all">전체 보기</option>
+                </select>
+              </label>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-white px-3 py-1.5 text-xs font-extrabold text-[#6c655b]">
+                선택 {selectedManualReviewProducts.length.toLocaleString()}개
+              </span>
+              <div className="flex min-h-10 items-center rounded-lg border border-[#2d73ff]/20 bg-[#eef3ff] px-3 text-xs font-extrabold text-[#2d73ff]">
+                선택한 상품 중 가격이 변경된 검토완료 상품만 CSV에 포함됩니다.
+              </div>
+              <button
+                type="button"
+                disabled={!selectedManualReviewProducts.length}
+                onClick={downloadManualReviewCsv}
+                className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2d73ff]/25 bg-white px-4 text-sm font-extrabold text-[#2d73ff] transition hover:border-[#2d73ff] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                선택 검토완료 CSV {manualReviewSelectedCsvCount.toLocaleString()}개
+              </button>
+            </div>
+          </div>
+        </section>
+
         {manualReviewProducts.length ? (
           <section className="overflow-hidden rounded-lg border border-black/10 bg-white shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/10 bg-[#fbfaf7] px-4 py-3">
@@ -1475,55 +1540,47 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
                 </button>
                 {manualReviewListOpen ? (
                   <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-[#6c655b]">
-                  <span>
-                    {manualReviewListStart.toLocaleString()}-{manualReviewListEnd.toLocaleString()} / {manualReviewProducts.length.toLocaleString()}개
-                  </span>
-                  <select
-                    value={String(manualReviewListPageSize)}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      setManualReviewListPageSize(value === "all" ? "all" : (Number(value) as ManualReviewListPageSize));
-                      setManualReviewListPage(1);
-                    }}
-                    className="min-h-8 rounded-lg border border-black/10 bg-white px-2 text-xs font-extrabold text-[#151515] outline-none transition focus:border-[#2d73ff]"
-                    aria-label="검토 목록 표시 개수"
-                  >
-                    <option value="10">10개 보기</option>
-                    <option value="30">30개 보기</option>
-                    <option value="50">50개 보기</option>
-                    <option value="100">100개 보기</option>
-                    <option value="300">300개 보기</option>
-                    <option value="500">500개 보기</option>
-                    <option value="all">전체 보기</option>
-                  </select>
-                  <button
-                    type="button"
-                    disabled={safeManualReviewListPage <= 1}
-                    onClick={() => setManualReviewListPage((page) => Math.max(1, page - 1))}
-                    className="inline-flex min-h-8 items-center justify-center rounded-lg border border-black/15 bg-white px-2 text-xs font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    이전
-                  </button>
-                  <span>
-                    {safeManualReviewListPage.toLocaleString()} / {manualReviewListTotalPages.toLocaleString()}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={safeManualReviewListPage >= manualReviewListTotalPages}
-                    onClick={() => setManualReviewListPage((page) => Math.min(manualReviewListTotalPages, page + 1))}
-                    className="inline-flex min-h-8 items-center justify-center rounded-lg border border-black/15 bg-white px-2 text-xs font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    다음
-                  </button>
+                    <span>
+                      {manualReviewListStart.toLocaleString()}-{manualReviewListEnd.toLocaleString()} / {manualReviewProducts.length.toLocaleString()}개
+                    </span>
+                    <button
+                      type="button"
+                      disabled={safeManualReviewListPage <= 1}
+                      onClick={() => setManualReviewListPage((page) => Math.max(1, page - 1))}
+                      className="inline-flex min-h-8 items-center justify-center rounded-lg border border-black/15 bg-white px-2 text-xs font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      이전
+                    </button>
+                    <span>
+                      {safeManualReviewListPage.toLocaleString()} / {manualReviewListTotalPages.toLocaleString()}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={safeManualReviewListPage >= manualReviewListTotalPages}
+                      onClick={() => setManualReviewListPage((page) => Math.min(manualReviewListTotalPages, page + 1))}
+                      className="inline-flex min-h-8 items-center justify-center rounded-lg border border-black/15 bg-white px-2 text-xs font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      다음
+                    </button>
                   </div>
                 ) : null}
               </div>
               {manualReviewListOpen ? (
               <div className="max-h-[620px] overflow-auto">
-                <table className="min-w-[1020px] w-full border-collapse text-left text-sm">
+                <table className="min-w-[1080px] w-full border-collapse text-left text-sm">
                   <thead className="sticky top-0 z-10 bg-white text-xs font-extrabold text-[#6c655b] shadow-[0_1px_0_rgba(0,0,0,0.1)]">
                     <tr>
                       <th className="w-16 px-4 py-3">No</th>
+                      <th className="w-12 px-4 py-3">
+                        <input
+                          type="checkbox"
+                          checked={isManualReviewCurrentPageAllSelected}
+                          disabled={!manualReviewListProducts.length}
+                          onChange={(event) => toggleCurrentManualReviewPageSelection(event.target.checked)}
+                          aria-label="현재 수동검토 페이지 전체 선택"
+                          className="h-4 w-4 rounded border-black/20"
+                        />
+                      </th>
                       <th className="px-4 py-3">상품</th>
                       <th className="px-4 py-3">상태</th>
                       <th className="px-4 py-3">바이마 현재가</th>
@@ -1546,6 +1603,15 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
                         <tr key={product.id} className={isCurrent ? "bg-[#eef3ff]" : undefined}>
                           <td className="px-4 py-3 align-top text-xs font-extrabold text-[#8a8378]">
                             {rowNumber.toLocaleString()}
+                          </td>
+                          <td className="px-4 py-3 align-top">
+                            <input
+                              type="checkbox"
+                              checked={selectedManualReviewProductIds.has(product.id)}
+                              onChange={(event) => toggleManualReviewSelection(product.id, event.target.checked)}
+                              aria-label={`${getProductLabel(product)} 선택`}
+                              className="h-4 w-4 rounded border-black/20"
+                            />
                           </td>
                           <td className="min-w-[420px] px-4 py-3 align-top">
                             <div className="font-extrabold text-[#151515]">{product.title || product.buymaProductId || "제목 없음"}</div>
@@ -1710,7 +1776,10 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
               onChange={(event) => {
                 const nextFilterMode = event.target.value as ProductFilterMode;
                 setFilterMode(nextFilterMode);
-                if (nextFilterMode === "unchecked" && pageSize > UNCHECKED_MAX_PAGE_SIZE) {
+                if (
+                  nextFilterMode === "unchecked" &&
+                  (pageSize === "all" || pageSize > UNCHECKED_MAX_PAGE_SIZE)
+                ) {
                   setPageSize(UNCHECKED_MAX_PAGE_SIZE);
                 }
                 resetSelectionForListChange();
@@ -1773,17 +1842,22 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
               표시
               <select
                 id="competitor-page-size"
-                value={pageSize}
+                value={String(pageSize)}
                 onChange={(event) => {
-                  setPageSize(Number(event.target.value));
+                  const value = event.target.value;
+                  setPageSize(value === "all" ? "all" : (Number(value) as CompetitorPageSize));
                   resetSelectionForListChange();
                   setCurrentPage(1);
                 }}
                 className="min-h-10 min-w-[110px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
               >
                 {PAGE_SIZE_OPTIONS.map((option) => (
-                  <option key={option} value={option} disabled={filterMode === "unchecked" && option > UNCHECKED_MAX_PAGE_SIZE}>
-                    {option}개씩
+                  <option
+                    key={option}
+                    value={option}
+                    disabled={filterMode === "unchecked" && (option === "all" || option > UNCHECKED_MAX_PAGE_SIZE)}
+                  >
+                    {option === "all" ? "전체 보기" : `${option}개 보기`}
                   </option>
                 ))}
               </select>
@@ -1852,7 +1926,10 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
                 currentPageProducts.map((product, index) => {
                   const priceStatus = getPriceStatus(product);
                   const isChecking = checkingIds.has(product.id);
-                  const rowNumber = sortedProducts.length - ((safeCurrentPage - 1) * pageSize + index);
+                  const rowNumber =
+                    pageSize === "all"
+                      ? sortedProducts.length - index
+                      : sortedProducts.length - ((safeCurrentPage - 1) * pageSize + index);
 
                   return (
                     <tr key={product.id} className="border-t border-black/10 align-top">
