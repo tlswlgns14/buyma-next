@@ -52,7 +52,7 @@ import {
 } from "@/lib/buyma/text";
 
 type ToolTab = "edit" | "editor" | "settings";
-type EditorTemplate = "basic" | "lucky" | "northface" | "northfaceWhiteLabel";
+type EditorTemplate = "basic" | "lucky" | "lucky2" | "northface" | "northfaceWhiteLabel";
 type CsvTableKey = "items" | "colorSizes";
 type CsvCellEdits = Record<string, string>;
 type EditorPlacedImage = {
@@ -1480,6 +1480,8 @@ function ImageEditorPanel({
 
     if (template === "lucky") {
       renderLuckyTemplate(ctx);
+    } else if (template === "lucky2") {
+      renderLucky2Template(ctx);
     } else if (template === "northface") {
       renderNorthFaceTemplate(ctx);
     } else if (template === "northfaceWhiteLabel") {
@@ -1764,6 +1766,7 @@ function ImageEditorPanel({
             {[
               ["basic", "기본형"],
               ["lucky", "럭키 배치"],
+              ["lucky2", "럭키 배치2"],
               ["northface", "노스페이스"],
               ["northfaceWhiteLabel", "노스페이스 화이트라벨"],
             ].map(([value, label]) => (
@@ -3649,6 +3652,18 @@ function renderLuckyTemplate(ctx: CanvasRenderingContext2D) {
   ctx.lineTo(800, headerHeight);
   ctx.moveTo(leftWidth, headerHeight);
   ctx.lineTo(leftWidth, 800);
+  ctx.stroke();
+}
+
+function renderLucky2Template(ctx: CanvasRenderingContext2D) {
+  const headerHeight = 112;
+
+  ctx.strokeStyle = "#111";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, 798, 798);
+  ctx.beginPath();
+  ctx.moveTo(0, headerHeight);
+  ctx.lineTo(800, headerHeight);
   ctx.stroke();
 }
 

@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 
 import { useAuth } from "@/contexts/AuthContext";
 import {
+  buildBuymaSearchUrl,
   compareBuymaCompetitorPrices,
   type BuymaCompetitorPriceItem,
   type BuymaCompetitorPriceResponse,
@@ -12,6 +13,10 @@ import { supabase } from "@/lib/supabase";
 type TrackedStatus = "active" | "paused" | "missing" | "ended";
 type SortMode = "action" | "csv" | "csvReverse" | "unchecked" | "oldestChecked" | "title";
 type ProductFilterMode = "all" | "unchecked" | "checked" | "lower" | "noLower" | "error" | "empty" | "missing";
+type ManualReviewFilterMode = "all" | "pending" | "reviewed" | "recheck";
+type ManualReviewSortMode = "csv" | "csvReverse" | "title" | "oldestReviewed";
+type ManualReviewListPageSize = 10 | 30 | 50 | 100 | 300 | 500 | "all";
+type ManualReviewStatus = "pending" | "reviewed" | "recheck";
 
 type TrackedBuymaProduct = {
   id: string;
@@ -58,6 +63,36 @@ type CompetitorPriceProductRow = {
   csv_imported_at: string | null;
 };
 
+type ManualPriceReviewBatchRow = {
+  id: string;
+  name: string | null;
+  source_filename: string | null;
+  created_at: string | null;
+};
+
+type ManualPriceReviewItemRow = {
+  id: string;
+  batch_id: string;
+  merge_key: string;
+  buyma_product_id: string | null;
+  buyma_url: string | null;
+  title: string | null;
+  brand: string | null;
+  model_number: string | null;
+  own_price: number | null;
+  search_keyword: string | null;
+  search_url: string | null;
+  manual_lowest_price: number | null;
+  manual_update_price: number | null;
+  review_status: ManualReviewStatus;
+  reviewed_at: string | null;
+  recheck_requested_at: string | null;
+  exported_at: string | null;
+  created_at: string | null;
+  csv_order: number | null;
+  csv_imported_at: string | null;
+};
+
 type CsvImportFailure = {
   rowNumber: number;
   reason: string;
@@ -72,9 +107,16 @@ const PRODUCT_SELECT_COLUMNS =
   "id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,status,last_checked_at,last_search_url,reference_price,lower_competitors,last_results,error,created_at,csv_order,csv_imported_at";
 const PRODUCT_SELECT_COLUMNS_LEGACY =
   "id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,status,last_checked_at,last_search_url,reference_price,lower_competitors,last_results,error,created_at";
+const MANUAL_REVIEW_ITEM_SELECT_COLUMNS =
+  "id,batch_id,merge_key,buyma_product_id,buyma_url,title,brand,model_number,own_price,search_keyword,search_url,manual_lowest_price,manual_update_price,review_status,reviewed_at,recheck_requested_at,exported_at,created_at,csv_order,csv_imported_at";
 
-export default function CompetitorPriceChecker() {
+type CompetitorPriceCheckerProps = {
+  mode?: "checker" | "manual-review";
+};
+
+export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorPriceCheckerProps) {
   const { authUser, session } = useAuth();
+  const isManualReviewMode = mode === "manual-review";
   const userId = authUser?.id ?? "";
   const [products, setProducts] = useState<TrackedBuymaProduct[]>([]);
   const [ownerName, setOwnerName] = useState(DEFAULT_OWNER_NAME);
@@ -86,9 +128,28 @@ export default function CompetitorPriceChecker() {
   const [pageSize, setPageSize] = useState<number>(50);
   const [currentPage, setCurrentPage] = useState(1);
   const [filterMode, setFilterMode] = useState<ProductFilterMode>("all");
+  const [manualReviewFilterMode, setManualReviewFilterMode] = useState<ManualReviewFilterMode>("all");
+  const [manualReviewSortMode, setManualReviewSortMode] = useState<ManualReviewSortMode>("csvReverse");
+  const [manualReviewProductSearch, setManualReviewProductSearch] = useState("");
+  const [manualReviewListPageSize, setManualReviewListPageSize] = useState<ManualReviewListPageSize>(50);
+  const [manualReviewListPage, setManualReviewListPage] = useState(1);
+  const [manualReviewListOpen, setManualReviewListOpen] = useState(true);
+  const manualReviewFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [manualReviewUploading, setManualReviewUploading] = useState(false);
   const [productNameSearch, setProductNameSearch] = useState("");
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(() => new Set());
   const [priceEdits, setPriceEdits] = useState<Record<string, string>>({});
+  const [manualReviewImportedProducts, setManualReviewImportedProducts] = useState<TrackedBuymaProduct[]>([]);
+  const [manualReviewBatchId, setManualReviewBatchId] = useState("");
+  const [manualReviewBatchName, setManualReviewBatchName] = useState("");
+  const [manualReviewBatchCreatedAt, setManualReviewBatchCreatedAt] = useState("");
+  const [manualPriceEdits, setManualPriceEdits] = useState<Record<string, string>>({});
+  const [manualReviewProductId, setManualReviewProductId] = useState("");
+  const [manualLowestPrices, setManualLowestPrices] = useState<Record<string, string>>({});
+  const [manualReviewedIds, setManualReviewedIds] = useState<Set<string>>(() => new Set());
+  const [manualReviewedAt, setManualReviewedAt] = useState<Record<string, string>>({});
+  const [manualRecheckIds, setManualRecheckIds] = useState<Set<string>>(() => new Set());
+  const [manualRecheckRequestedAt, setManualRecheckRequestedAt] = useState<Record<string, string>>({});
   const [csvImportFailures, setCsvImportFailures] = useState<CsvImportFailure[]>([]);
 
   const activeProducts = useMemo(
@@ -123,6 +184,88 @@ export default function CompetitorPriceChecker() {
     () => products.filter((product) => selectedProductIds.has(product.id)),
     [products, selectedProductIds],
   );
+  const manualReviewSourceProducts = manualReviewImportedProducts;
+  const manualReviewedProducts = useMemo(
+    () => manualReviewSourceProducts.filter((product) => manualReviewedIds.has(product.id)),
+    [manualReviewSourceProducts, manualReviewedIds],
+  );
+  const manualRemainingProducts = useMemo(
+    () => manualReviewSourceProducts.filter((product) => !manualReviewedIds.has(product.id) && !manualRecheckIds.has(product.id)),
+    [manualRecheckIds, manualReviewSourceProducts, manualReviewedIds],
+  );
+  const manualRecheckProducts = useMemo(
+    () => manualReviewSourceProducts.filter((product) => manualRecheckIds.has(product.id)),
+    [manualRecheckIds, manualReviewSourceProducts],
+  );
+  const manualReviewBaseProducts = useMemo(
+    () =>
+      sortManualReviewProducts(
+        filterManualReviewSearch(manualReviewSourceProducts, manualReviewProductSearch),
+        manualReviewSortMode,
+        manualReviewedAt,
+      ),
+    [manualReviewProductSearch, manualReviewSortMode, manualReviewSourceProducts, manualReviewedAt],
+  );
+  const manualReviewProducts = useMemo(
+    () => filterManualReviewProducts(manualReviewBaseProducts, manualReviewFilterMode, manualReviewedIds, manualRecheckIds),
+    [manualRecheckIds, manualReviewBaseProducts, manualReviewFilterMode, manualReviewedIds],
+  );
+  const manualReviewCurrentCsvProducts = useMemo(
+    () => manualReviewProducts.filter((product) => manualReviewedIds.has(product.id)),
+    [manualReviewProducts, manualReviewedIds],
+  );
+  const manualReviewCurrentCsvCount = useMemo(
+    () => countPriceUpdateCsvRows(manualReviewCurrentCsvProducts, manualPriceEdits, true),
+    [manualPriceEdits, manualReviewCurrentCsvProducts],
+  );
+  const manualReviewAllCsvCount = useMemo(
+    () => countPriceUpdateCsvRows(manualReviewedProducts, manualPriceEdits, true),
+    [manualPriceEdits, manualReviewedProducts],
+  );
+  const manualReviewIndex = manualReviewProducts.findIndex((product) => product.id === manualReviewProductId);
+  const manualReviewProduct = manualReviewIndex >= 0 ? manualReviewProducts[manualReviewIndex] : manualReviewProducts[0];
+  const manualReviewPosition = manualReviewProduct
+    ? Math.max(0, manualReviewProducts.findIndex((product) => product.id === manualReviewProduct.id)) + 1
+    : 0;
+  const manualReviewListTotalPages =
+    manualReviewListPageSize === "all"
+      ? 1
+      : Math.max(1, Math.ceil(manualReviewProducts.length / manualReviewListPageSize));
+  const safeManualReviewListPage = Math.min(Math.max(1, manualReviewListPage), manualReviewListTotalPages);
+  const manualReviewListProducts = useMemo(() => {
+    if (manualReviewListPageSize === "all") return manualReviewProducts;
+    const start = (safeManualReviewListPage - 1) * manualReviewListPageSize;
+    return manualReviewProducts.slice(start, start + manualReviewListPageSize);
+  }, [manualReviewListPageSize, manualReviewProducts, safeManualReviewListPage]);
+  const manualReviewListStart = manualReviewProducts.length
+    ? manualReviewListPageSize === "all"
+      ? 1
+      : (safeManualReviewListPage - 1) * manualReviewListPageSize + 1
+    : 0;
+  const manualReviewListEnd =
+    manualReviewListPageSize === "all"
+      ? manualReviewProducts.length
+      : Math.min(safeManualReviewListPage * manualReviewListPageSize, manualReviewProducts.length);
+  const manualReviewLowestPrice = manualReviewProduct ? manualLowestPrices[manualReviewProduct.id] ?? "" : "";
+  const manualReviewSuggestedPrice = manualReviewProduct
+    ? getManualReviewPriceEditValue(manualReviewProduct, manualPriceEdits)
+    : "";
+  const manualReviewUploadPrice = getPositiveIntegerPrice(manualReviewSuggestedPrice);
+  const isManualReviewUploadPriceInvalid =
+    Boolean(manualReviewProduct) && manualReviewUploadPrice === null;
+  const manualReviewPriceDiff = manualReviewProduct && manualReviewUploadPrice !== null
+    ? manualReviewUploadPrice - manualReviewProduct.ownPrice
+    : 0;
+  const manualReviewProductStatus = manualReviewProduct
+    ? getManualReviewStatus(
+        manualReviewedIds.has(manualReviewProduct.id),
+        manualRecheckIds.has(manualReviewProduct.id),
+      )
+    : null;
+  const manualReviewUrl = manualReviewProduct ? getBuymaReviewUrl(manualReviewProduct) : "";
+  const manualReviewBatchLabel = manualReviewBatchName
+    ? `${manualReviewBatchCreatedAt ? `${formatDateTime(manualReviewBatchCreatedAt)} ` : ""}${getManualReviewBatchFilename(manualReviewBatchName)}`
+    : "";
   const priceUpdateCsvLabel = `선택 ${selectedProducts.length.toLocaleString()}개 CSV`;
   const selectedCheckLabel = `선택 ${selectedProducts.length.toLocaleString()}개 확인`;
   const selectedDeleteLabel = `선택 ${selectedProducts.length.toLocaleString()}개 삭제`;
@@ -133,8 +276,67 @@ export default function CompetitorPriceChecker() {
     setSelectedProductIds(new Set());
   }
 
+  const applyManualReviewRows = useCallback((rows: ManualPriceReviewItemRow[], batch?: ManualPriceReviewBatchRow | null) => {
+    const products = rows.map(manualReviewRowToProduct);
+    setManualReviewImportedProducts(products);
+    setManualReviewBatchId(batch?.id ?? rows[0]?.batch_id ?? "");
+    setManualReviewBatchName(batch?.name?.trim() || batch?.source_filename?.trim() || "");
+    setManualReviewBatchCreatedAt(batch?.created_at ?? "");
+    setManualReviewProductId("");
+    setManualLowestPrices(getManualLowestPriceMap(rows));
+    setManualPriceEdits(getManualUpdatePriceMap(rows));
+    setManualReviewedIds(getManualStatusIds(rows, "reviewed"));
+    setManualReviewedAt(getManualDateMap(rows, "reviewed_at"));
+    setManualRecheckIds(getManualStatusIds(rows, "recheck"));
+    setManualRecheckRequestedAt(getManualDateMap(rows, "recheck_requested_at"));
+    setManualReviewListPage(1);
+  }, []);
+
   const loadTrackingData = useCallback(async () => {
     if (!userId) return;
+
+    if (isManualReviewMode) {
+      setTrackingLoaded(false);
+
+      const { data: batch, error: batchError } = await supabase
+        .from("manual_price_review_batches")
+        .select("id,name,source_filename,created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (batchError) {
+        setStatus("수동검토 데이터를 불러오지 못했습니다. Supabase 마이그레이션 적용 여부를 확인해 주세요.");
+        setTrackingLoaded(true);
+        return;
+      }
+
+      if (!batch) {
+        applyManualReviewRows([], null);
+        setStatus("BUYMA CSV를 업로드해 수동검토 목록을 가져와 주세요.");
+        setTrackingLoaded(true);
+        return;
+      }
+
+      const { data: rows, error: itemError } = await supabase
+        .from("manual_price_review_items")
+        .select(MANUAL_REVIEW_ITEM_SELECT_COLUMNS)
+        .eq("user_id", userId)
+        .eq("batch_id", (batch as ManualPriceReviewBatchRow).id)
+        .order("csv_order", { ascending: true });
+
+      if (itemError) {
+        setStatus(`수동검토 상품을 불러오지 못했습니다: ${itemError.message}`);
+        setTrackingLoaded(true);
+        return;
+      }
+
+      applyManualReviewRows((rows ?? []) as ManualPriceReviewItemRow[], batch as ManualPriceReviewBatchRow);
+      setStatus("수동검토 데이터를 불러왔습니다.");
+      setTrackingLoaded(true);
+      return;
+    }
 
     setTrackingLoaded(false);
 
@@ -162,21 +364,21 @@ export default function CompetitorPriceChecker() {
     setProducts(((rows ?? []) as CompetitorPriceProductRow[]).map(rowToProduct));
     setStatus("추적 데이터를 불러왔습니다.");
     setTrackingLoaded(true);
-  }, [userId]);
+  }, [applyManualReviewRows, isManualReviewMode, userId]);
 
   useEffect(() => {
     void Promise.resolve().then(loadTrackingData);
   }, [loadTrackingData]);
 
   useEffect(() => {
-    if (!userId || !trackingLoaded) return;
+    if (!userId || !trackingLoaded || isManualReviewMode) return;
 
     const timer = window.setTimeout(() => {
       void saveOwnerName(userId, ownerName);
     }, 500);
 
     return () => window.clearTimeout(timer);
-  }, [userId, ownerName, trackingLoaded]);
+  }, [isManualReviewMode, userId, ownerName, trackingLoaded]);
 
   async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -189,6 +391,117 @@ export default function CompetitorPriceChecker() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "파일을 읽지 못했습니다.";
       setStatus(message);
+    }
+  }
+
+  async function handleManualReviewFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!userId) {
+      setStatus("로그인이 필요합니다.");
+      return;
+    }
+
+    let createdBatchId = "";
+    setManualReviewUploading(true);
+    setStatus(`수동검토 CSV 업로드 중입니다: ${file.name}`);
+    try {
+      const text = await readFileText(file);
+      const importResult = parseProductsFromCsv(text, { requireBuymaProductId: true });
+      if (!importResult.products.length) {
+        setCsvImportFailures(importResult.failures);
+        setStatus(
+          `수동검토 CSV에서 가져올 상품을 찾지 못했습니다. 기존 수동검토 목록은 유지합니다. 총 ${importResult.totalRows.toLocaleString()}행 중 실패 ${importResult.failedRows.toLocaleString()}행입니다.`,
+        );
+        return;
+      }
+
+      const csvImportedAt = new Date().toISOString();
+      const orderedProducts = importResult.products.map((product, index) => ({
+        ...product,
+        csvOrder: index + 1,
+        csvImportedAt,
+      }));
+      const uniqueImport = dedupeManualReviewImportedProducts(orderedProducts);
+
+      const previousBatchId = manualReviewBatchId;
+      const batch = await createManualReviewBatch(userId, file.name);
+      createdBatchId = batch.id;
+      const { data: existingRows, error: existingError } = await supabase
+        .from("manual_price_review_items")
+        .select(MANUAL_REVIEW_ITEM_SELECT_COLUMNS)
+        .eq("user_id", userId)
+        .eq("batch_id", previousBatchId || batch.id);
+
+      if (existingError) {
+        throw existingError;
+      }
+
+      const existingManualRows = (existingRows ?? []) as ManualPriceReviewItemRow[];
+      const rowsToInsert = mergeManualReviewImportRows(
+        userId,
+        batch.id,
+        uniqueImport.products,
+        existingManualRows,
+      );
+
+      const { data: savedRows, error: itemError } = await supabase
+        .from("manual_price_review_items")
+        .insert(rowsToInsert)
+        .select(MANUAL_REVIEW_ITEM_SELECT_COLUMNS);
+
+      if (itemError) {
+        throw itemError;
+      }
+
+      const { data: mergedRows, error: mergedRowsError } = await supabase
+        .from("manual_price_review_items")
+        .select(MANUAL_REVIEW_ITEM_SELECT_COLUMNS)
+        .eq("user_id", userId)
+        .eq("batch_id", batch.id)
+        .order("csv_order", { ascending: true });
+
+      if (mergedRowsError) {
+        throw mergedRowsError;
+      }
+
+      const finalRows = (mergedRows ?? savedRows ?? []) as ManualPriceReviewItemRow[];
+      let previousBatchDeleteMessage = "";
+      if (previousBatchId && previousBatchId !== batch.id) {
+        const { error: previousBatchDeleteError } = await supabase
+          .from("manual_price_review_batches")
+          .delete()
+          .eq("user_id", userId)
+          .eq("id", previousBatchId);
+
+        if (previousBatchDeleteError) {
+          previousBatchDeleteMessage = ` 이전 목록 삭제 실패: ${previousBatchDeleteError.message}`;
+        }
+      }
+      applyManualReviewRows(finalRows, batch);
+      createdBatchId = "";
+      setManualReviewFilterMode("all");
+      setManualReviewProductSearch("");
+      setCsvImportFailures(importResult.failures);
+      const duplicateMessage = uniqueImport.duplicateCount
+        ? ` 중복 상품ID ${uniqueImport.duplicateCount.toLocaleString()}개는 제외했습니다.`
+        : "";
+      setStatus(
+        `수동검토 CSV ${importResult.totalRows.toLocaleString()}행 중 ${uniqueImport.products.length.toLocaleString()}개 상품을 반영했습니다. 최종 목록 ${finalRows.length.toLocaleString()}개, 실패 ${importResult.failedRows.toLocaleString()}행입니다.${duplicateMessage}${previousBatchDeleteMessage}`,
+      );
+    } catch (error) {
+      if (createdBatchId) {
+        await supabase
+          .from("manual_price_review_batches")
+          .delete()
+          .eq("user_id", userId)
+          .eq("id", createdBatchId);
+      }
+      const message = error instanceof Error ? error.message : "수동검토 CSV를 읽지 못했습니다.";
+      setStatus(message);
+    } finally {
+      setManualReviewUploading(false);
     }
   }
 
@@ -429,6 +742,49 @@ export default function CompetitorPriceChecker() {
     }
   }
 
+  async function saveManualReviewItemPatch(productId: string, patch: Record<string, unknown>) {
+    if (!userId || !productId || !Object.keys(patch).length) return false;
+
+    const { error } = await supabase
+      .from("manual_price_review_items")
+      .update(patch)
+      .eq("user_id", userId)
+      .eq("id", productId);
+
+    if (error) {
+      setStatus(`수동검토 저장에 실패했습니다: ${error.message}`);
+      return false;
+    }
+
+    return true;
+  }
+
+  async function removeAllManualReviewProducts() {
+    if (!userId || !manualReviewBatchId || !manualReviewSourceProducts.length) return;
+
+    const confirmed = window.confirm(
+      `현재 수동가격검토 목록 ${manualReviewSourceProducts.length.toLocaleString()}개를 전체 삭제할까요?\n\n검토상태, 확인한 최저 경쟁가, 업로드 예정가도 함께 삭제됩니다. 이 작업은 되돌릴 수 없습니다.`,
+    );
+    if (!confirmed) return;
+
+    setStatus("수동가격검토 목록 전체 삭제 중입니다.");
+
+    const { error } = await supabase
+      .from("manual_price_review_batches")
+      .delete()
+      .eq("user_id", userId)
+      .eq("id", manualReviewBatchId);
+
+    if (error) {
+      setStatus(`수동가격검토 전체 삭제에 실패했습니다: ${error.message}`);
+      return;
+    }
+
+    applyManualReviewRows([], null);
+    setCsvImportFailures([]);
+    setStatus(`수동가격검토 목록 ${manualReviewSourceProducts.length.toLocaleString()}개를 삭제했습니다.`);
+  }
+
   function removeProduct(id: string) {
     const product = products.find((item) => item.id === id);
     if (!product) return;
@@ -516,26 +872,159 @@ export default function CompetitorPriceChecker() {
     });
   }
 
-  function downloadPriceUpdateCsv() {
-    const targets = selectedProducts;
+  async function updateManualPriceEdit(productId: string, value: string) {
+    const numericValue = value.replace(/[^\d]/g, "");
+    const previousValue = manualPriceEdits[productId];
+    const numericPrice = Number(numericValue);
 
-    if (!targets.length) {
-      setStatus("가격수정 CSV로 다운로드할 상품을 선택해 주세요.");
+    setManualPriceEdits((current) => {
+      const next = { ...current };
+      next[productId] = numericValue;
+      return next;
+    });
+
+    if (!numericValue || !Number.isFinite(numericPrice) || numericPrice <= 0) {
       return;
     }
 
-    const rows = targets.flatMap((product) => {
+    const saved = await saveManualReviewItemPatch(productId, {
+      manual_update_price: Math.floor(numericPrice),
+    });
+    if (!saved) {
+      setManualPriceEdits((current) => {
+        const next = { ...current };
+        if (previousValue === undefined) {
+          delete next[productId];
+        } else {
+          next[productId] = previousValue;
+        }
+        return next;
+      });
+    }
+  }
+
+  async function updateManualLowestPrice(product: TrackedBuymaProduct, value: string) {
+    const numericValue = value.replace(/[^\d]/g, "");
+    const previousValue = manualLowestPrices[product.id];
+
+    setManualLowestPrices((current) => ({
+      ...current,
+      [product.id]: numericValue,
+    }));
+    const saved = await saveManualReviewItemPatch(product.id, {
+      manual_lowest_price: numericValue ? Number(numericValue) : null,
+    });
+    if (!saved) {
+      setManualLowestPrices((current) => {
+        const next = { ...current };
+        if (previousValue === undefined) {
+          delete next[product.id];
+        } else {
+          next[product.id] = previousValue;
+        }
+        return next;
+      });
+      return;
+    }
+
+    const lowestPrice = Number(numericValue);
+    if (Number.isFinite(lowestPrice) && lowestPrice > 0) {
+      await updateManualPriceEdit(product.id, String(Math.max(1, lowestPrice - 10)));
+    }
+  }
+
+  function downloadPriceUpdateCsv() {
+    downloadPriceUpdateCsvForTargets({
+      targets: selectedProducts,
+      emptyMessage: "가격수정 CSV로 다운로드할 상품을 선택해 주세요.",
+      scopeLabel: "선택 상품 기준",
+    });
+  }
+
+  function downloadManualReviewCsv() {
+    downloadPriceUpdateCsvForTargets({
+      targets: manualReviewedProducts,
+      emptyMessage: "수동 검토 완료 상품이 없습니다. 가격을 확인한 뒤 완료 처리해 주세요.",
+      editedPrices: manualPriceEdits,
+      scopeLabel: "전체 검토완료 기준",
+      reviewOnly: true,
+      requirePriceChange: true,
+      onDownloaded: markManualReviewExported,
+    });
+  }
+
+  function downloadCurrentManualReviewCsv() {
+    downloadPriceUpdateCsvForTargets({
+      targets: manualReviewCurrentCsvProducts,
+      candidateCount: manualReviewProducts.length,
+      emptyMessage: "현재 보기 안에 검토완료 상품이 없습니다.",
+      editedPrices: manualPriceEdits,
+      scopeLabel: "현재 보기 기준",
+      reviewOnly: true,
+      requirePriceChange: true,
+      onDownloaded: markManualReviewExported,
+    });
+  }
+
+  function downloadPriceUpdateCsvForTargets({
+    targets,
+    emptyMessage,
+    editedPrices = priceEdits,
+    scopeLabel,
+    candidateCount = targets.length,
+    reviewOnly = false,
+    requirePriceChange = false,
+    onDownloaded,
+  }: {
+    targets: TrackedBuymaProduct[];
+    emptyMessage: string;
+    editedPrices?: Record<string, string>;
+    scopeLabel: string;
+    candidateCount?: number;
+    reviewOnly?: boolean;
+    requirePriceChange?: boolean;
+    onDownloaded?: (products: TrackedBuymaProduct[]) => void;
+  }) {
+    if (!targets.length) {
+      setStatus(emptyMessage);
+      return;
+    }
+
+    let skippedUnchangedCount = 0;
+    const csvRows = targets.flatMap((product) => {
       const productId = product.buymaProductId.trim();
-      const price = getExportPrice(product, priceEdits[product.id]);
+      const price = getExportPrice(product, editedPrices[product.id]);
 
       if (!productId || !price) return [];
-      return [[productId, "公開", "出品中", String(price)]];
+      if (requirePriceChange && !hasExportPriceChange(product, price)) {
+        skippedUnchangedCount += 1;
+        return [];
+      }
+      return [{ product, row: [productId, "公開", "出品中", String(price)] }];
     });
+    const rows = csvRows.map((item) => item.row);
 
     if (!rows.length) {
+      if (requirePriceChange && skippedUnchangedCount > 0) {
+        setStatus("가격이 변경된 검토완료 상품이 없습니다. 업로드 예정가가 바이마 현재가와 다른 상품만 다운로드됩니다.");
+        return;
+      }
       setStatus("다운로드할 BUYMA 상품ID와 가격이 있는 상품이 없습니다.");
       return;
     }
+
+    const excludedCount = Math.max(0, candidateCount - rows.length);
+    const unchangedText = requirePriceChange
+      ? `\n가격 미변경 제외: ${skippedUnchangedCount.toLocaleString()}개`
+      : "";
+    let conditionText = reviewOnly
+      ? "검토완료 상태이며 BUYMA 상품ID와 가격이 있는 상품만 CSV에 포함됩니다."
+      : "BUYMA 상품ID와 가격이 있는 상품만 CSV에 포함됩니다.";
+    conditionText = `${unchangedText}${conditionText}`;
+    const confirmed = window.confirm(
+      `${scopeLabel} 가격수정 CSV를 다운로드합니다.\n\n다운로드 대상: ${rows.length.toLocaleString()}개\n제외됨: ${excludedCount.toLocaleString()}개\n\n${conditionText}\n\n계속 다운로드할까요?`,
+    );
+    if (!confirmed) return;
 
     const content = "\uFEFF" + toCsvContent([["商品ID", "コントロール", "公開ステータス", "単価"], ...rows]);
     const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
@@ -546,7 +1035,128 @@ export default function CompetitorPriceChecker() {
     link.click();
     URL.revokeObjectURL(url);
 
-    setStatus(`선택 상품 ${rows.length.toLocaleString()}개 가격수정 CSV를 다운로드했습니다.`);
+    setStatus(`${rows.length.toLocaleString()}개 상품 가격수정 CSV를 다운로드했습니다.`);
+    onDownloaded?.(csvRows.map((item) => item.product));
+  }
+
+  function markManualReviewExported(exportedProducts: TrackedBuymaProduct[]) {
+    if (!userId || !exportedProducts.length) return;
+
+    const exportedAt = new Date().toISOString();
+    void supabase
+      .from("manual_price_review_items")
+      .update({ exported_at: exportedAt })
+      .eq("user_id", userId)
+      .in("id", exportedProducts.map((product) => product.id))
+      .then(({ error }) => {
+        if (error) {
+          setStatus(`CSV 내보냄 기록 저장에 실패했습니다: ${error.message}`);
+        }
+      });
+  }
+
+  function moveManualReview(offset: number) {
+    if (!manualReviewProducts.length) return;
+
+    const currentIndex = manualReviewProduct
+      ? Math.max(0, manualReviewProducts.findIndex((product) => product.id === manualReviewProduct.id))
+      : 0;
+    const nextIndex = Math.min(Math.max(currentIndex + offset, 0), manualReviewProducts.length - 1);
+    const nextProduct = manualReviewProducts[nextIndex];
+    setManualReviewProductId(nextProduct.id);
+  }
+
+  async function completeManualReview(product: TrackedBuymaProduct) {
+    const manualUpdatePrice = getPositiveIntegerPrice(getManualReviewPriceEditValue(product, manualPriceEdits));
+    if (manualUpdatePrice === null) {
+      setManualReviewProductId(product.id);
+      setStatus(`${getProductLabel(product)} 업로드 예정가는 1엔 이상 입력해야 검토완료로 저장할 수 있습니다.`);
+      return false;
+    }
+
+    const reviewedAt = new Date().toISOString();
+    const saved = await saveManualReviewItemPatch(product.id, {
+      manual_update_price: manualUpdatePrice,
+      review_status: "reviewed",
+      reviewed_at: reviewedAt,
+      recheck_requested_at: null,
+    });
+    if (!saved) return false;
+
+    setManualReviewedIds((current) => {
+      const next = new Set(current);
+      next.add(product.id);
+      return next;
+    });
+    setManualRecheckIds((current) => {
+      const next = new Set(current);
+      next.delete(product.id);
+      return next;
+    });
+    setManualReviewedAt((current) => ({
+      ...current,
+      [product.id]: reviewedAt,
+    }));
+    setStatus(`${getProductLabel(product)} 수동 검토를 완료했습니다.`);
+    return true;
+  }
+
+  async function requestManualRecheck(product: TrackedBuymaProduct) {
+    const recheckRequestedAt = new Date().toISOString();
+    const saved = await saveManualReviewItemPatch(product.id, {
+      review_status: "recheck",
+      reviewed_at: null,
+      recheck_requested_at: recheckRequestedAt,
+    });
+    if (!saved) return;
+
+    setManualReviewedIds((current) => {
+      const next = new Set(current);
+      next.delete(product.id);
+      return next;
+    });
+    setManualRecheckIds((current) => {
+      const next = new Set(current);
+      next.add(product.id);
+      return next;
+    });
+    setManualRecheckRequestedAt((current) => ({
+      ...current,
+      [product.id]: recheckRequestedAt,
+    }));
+    setManualReviewedAt((current) => {
+      const next = { ...current };
+      delete next[product.id];
+      return next;
+    });
+    setManualReviewProductId(product.id);
+    setStatus(`${getProductLabel(product)} 상품을 재검토 필요로 표시했습니다.`);
+  }
+
+  async function saveManualReviewAndNext(product: TrackedBuymaProduct) {
+    const saved = await completeManualReview(product);
+    if (!saved) return;
+
+    const currentIndex = manualReviewProducts.findIndex((item) => item.id === product.id);
+    const nextReviewedIds = new Set(manualReviewedIds);
+    nextReviewedIds.add(product.id);
+    const nextProduct =
+      manualReviewProducts.slice(Math.max(currentIndex + 1, 0)).find((item) => !nextReviewedIds.has(item.id)) ??
+      manualReviewProducts.slice(0, Math.max(currentIndex, 0)).find((item) => !nextReviewedIds.has(item.id));
+
+    if (nextProduct) {
+      setManualReviewProductId(nextProduct.id);
+    }
+  }
+
+  function openBuymaReviewUrl(product: TrackedBuymaProduct) {
+    const url = getBuymaReviewUrl(product);
+    if (!url) {
+      setStatus(`${getProductLabel(product)} BUYMA 검색 링크가 없습니다.`);
+      return;
+    }
+
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 
   function downloadSampleCsv() {
@@ -579,6 +1189,431 @@ export default function CompetitorPriceChecker() {
     link.download = `buyma_import_failures_${date}.csv`;
     link.click();
     URL.revokeObjectURL(url);
+  }
+
+  if (isManualReviewMode) {
+    return (
+      <div className="grid gap-5">
+        <div className="flex flex-wrap justify-end gap-2">
+          <input
+            ref={manualReviewFileInputRef}
+            type="file"
+            accept=".csv,.tsv,.txt"
+            onChange={(event) => void handleManualReviewFileChange(event)}
+            className="sr-only"
+          />
+          <button
+            type="button"
+            disabled={!trackingLoaded || manualReviewUploading}
+            onClick={() => {
+              if (manualReviewFileInputRef.current) {
+                manualReviewFileInputRef.current.value = "";
+                manualReviewFileInputRef.current.click();
+              }
+            }}
+            className="inline-flex min-h-10 items-center justify-center rounded-lg bg-[#151515] px-4 text-sm font-extrabold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {manualReviewUploading ? "업로드 중" : "BUYMA CSV 업로드"}
+          </button>
+          <button
+            type="button"
+            disabled={!manualReviewSourceProducts.length}
+            onClick={() => void removeAllManualReviewProducts()}
+            className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#c43b2f]/25 bg-white px-4 text-sm font-extrabold text-[#c43b2f] transition hover:border-[#c43b2f] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            전체 삭제
+          </button>
+        </div>
+        <section className="grid gap-4 rounded-lg border border-black/10 bg-white p-4 shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+              <div className="grid gap-2 text-xs font-extrabold text-[#6c655b]">
+                <div className="flex flex-wrap gap-2">
+                  <span className="rounded-full bg-[#eef3ff] px-3 py-1.5 text-[#2d73ff]">
+                    현재 보기 {manualReviewProducts.length.toLocaleString()}개
+                  </span>
+                  <span className="rounded-full bg-[#e9f8ef] px-3 py-1.5 text-[#24784c]">
+                    전체 검토완료 {manualReviewedProducts.length.toLocaleString()}개
+                  </span>
+                  <span className="rounded-full bg-[#f1eee6] px-3 py-1.5 text-[#6c655b]">
+                    전체 검토대기 {manualRemainingProducts.length.toLocaleString()}개
+                  </span>
+                  <span className="rounded-full bg-[#fff6e8] px-3 py-1.5 text-[#9a5c00]">
+                    재검토 필요 {manualRecheckProducts.length.toLocaleString()}개
+                  </span>
+                </div>
+                {manualReviewBatchLabel ? (
+                  <span className="w-fit rounded-full bg-[#fbfaf7] px-3 py-1.5">
+                    현재 묶음 {manualReviewBatchLabel}
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-filter-mode">
+                보기
+                <select
+                  id="manual-review-filter-mode"
+                  value={manualReviewFilterMode}
+                  onChange={(event) => {
+                    setManualReviewFilterMode(event.target.value as ManualReviewFilterMode);
+                    setManualReviewListPage(1);
+                  }}
+                  className="min-h-10 min-w-[140px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+                >
+                  <option value="all">전체</option>
+                  <option value="pending">검토대기</option>
+                  <option value="reviewed">검토완료</option>
+                  <option value="recheck">재검토 필요</option>
+                </select>
+              </label>
+              <label className="grid gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-sort-mode">
+                정렬
+                <select
+                  id="manual-review-sort-mode"
+                  value={manualReviewSortMode}
+                  onChange={(event) => {
+                    setManualReviewSortMode(event.target.value as ManualReviewSortMode);
+                    setManualReviewProductId("");
+                    setManualReviewListPage(1);
+                  }}
+                  className="min-h-10 min-w-[140px] rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+                >
+                  <option value="csv">CSV 순서</option>
+                  <option value="csvReverse">CSV 역순</option>
+                  <option value="title">상품명순</option>
+                  <option value="oldestReviewed">검토완료일 오래된순</option>
+                </select>
+              </label>
+              <label className="grid min-w-[220px] gap-1 text-xs font-extrabold text-[#6c655b]" htmlFor="manual-review-product-search">
+                검색
+                <input
+                  id="manual-review-product-search"
+                  value={manualReviewProductSearch}
+                  onChange={(event) => {
+                    setManualReviewProductSearch(event.target.value);
+                    setManualReviewListPage(1);
+                  }}
+                  placeholder="상품명 또는 상품번호 검색"
+                  className="min-h-10 w-full rounded-lg border border-black/10 bg-white px-3 text-sm font-bold text-[#151515] outline-none transition placeholder:text-[#9a9388] focus:border-[#2d73ff]"
+                />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section className="grid gap-4 rounded-lg border border-black/10 bg-white p-4 shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-extrabold text-[#151515]">현재 작업상품</h2>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <div className="flex min-h-10 items-center rounded-lg border border-[#2d73ff]/20 bg-[#eef3ff] px-3 text-xs font-extrabold text-[#2d73ff]">
+                가격이 변경된 검토완료 상품만 CSV에 포함됩니다.
+              </div>
+              <button
+                type="button"
+                disabled={!manualReviewCurrentCsvCount}
+                onClick={downloadCurrentManualReviewCsv}
+                className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2d73ff]/25 bg-white px-4 text-sm font-extrabold text-[#2d73ff] transition hover:border-[#2d73ff] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                현재 보기 CSV {manualReviewCurrentCsvCount.toLocaleString()}개
+              </button>
+              <button
+                type="button"
+                disabled={!manualReviewAllCsvCount}
+                onClick={downloadManualReviewCsv}
+                className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2f9d62]/25 bg-white px-4 text-sm font-extrabold text-[#24784c] transition hover:border-[#2f9d62] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                검토완료 전체 CSV {manualReviewAllCsvCount.toLocaleString()}개
+              </button>
+            </div>
+          </div>
+
+          {manualReviewProduct ? (
+            <div className="grid gap-4 rounded-lg border border-black/10 bg-[#fbfaf7] p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="inline-flex min-h-8 w-fit items-center rounded-lg bg-[#151515] px-3 text-sm font-extrabold text-white">
+                    현재 {manualReviewPosition.toLocaleString()} / 전체 {manualReviewProducts.length.toLocaleString()}
+                  </div>
+                  <div className="mt-1 break-words text-base font-extrabold text-[#151515]">
+                    {manualReviewProduct.title || manualReviewProduct.buymaProductId || "제목 없음"}
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-2 text-xs font-bold text-[#6c655b]">
+                    {manualReviewProduct.brand ? <span>브랜드 {manualReviewProduct.brand}</span> : null}
+                    {manualReviewProduct.modelNumber ? <span>모델번호 {manualReviewProduct.modelNumber}</span> : null}
+                    {manualReviewProduct.buymaProductId ? <span>상품ID {manualReviewProduct.buymaProductId}</span> : null}
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs font-extrabold">
+                    {manualReviewProductStatus ? (
+                      <StatusPill tone={manualReviewProductStatus.tone} label={manualReviewProductStatus.label} />
+                    ) : null}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={!manualReviewUrl}
+                    onClick={() => openBuymaReviewUrl(manualReviewProduct)}
+                    className="inline-flex min-h-10 items-center justify-center rounded-lg border border-[#2d73ff]/25 bg-white px-3 text-sm font-extrabold text-[#2d73ff] transition hover:border-[#2d73ff] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    BUYMA 열기
+                  </button>
+                  <button
+                    type="button"
+                    disabled={manualReviewPosition <= 1}
+                    onClick={() => moveManualReview(-1)}
+                    className="inline-flex min-h-10 items-center justify-center rounded-lg border border-black/15 bg-white px-3 text-sm font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    이전 상품
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid gap-2 md:grid-cols-3">
+                <div className="rounded-lg border border-[#2d73ff]/25 bg-[#eef3ff] px-4 py-3">
+                  <div className="text-xs font-extrabold text-[#2d73ff]">바이마 현재가</div>
+                  <div className="mt-1 text-2xl font-extrabold text-[#174bb8]">{formatYen(manualReviewProduct.ownPrice)}</div>
+                </div>
+                <div className="rounded-lg border border-[#2f9d62]/20 bg-[#e9f8ef] px-3 py-2">
+                  <div className="text-[11px] font-extrabold text-[#24784c]">업로드 예정가</div>
+                  <div className={`mt-1 text-lg font-extrabold ${isManualReviewUploadPriceInvalid ? "text-[#c43b2f]" : "text-[#24784c]"}`}>
+                    {manualReviewUploadPrice === null ? "미입력" : formatYen(manualReviewUploadPrice)}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-black/10 bg-white px-3 py-2">
+                  <div className="text-[11px] font-extrabold text-[#6c655b]">변경금액</div>
+                  {manualReviewUploadPrice === null ? (
+                    <div className="mt-1 text-lg font-extrabold text-[#c43b2f]">미입력</div>
+                  ) : manualReviewPriceDiff ? (
+                    <div className={`mt-1 text-lg font-extrabold ${manualReviewPriceDiff < 0 ? "text-[#2d73ff]" : "text-[#9a5c00]"}`}>
+                      {manualReviewPriceDiff > 0 ? "+" : ""}{formatYen(manualReviewPriceDiff)}
+                    </div>
+                  ) : (
+                    <div className="mt-1 text-lg font-extrabold text-[#8a8378]">변경 없음</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_560px] xl:grid-cols-[minmax(0,1fr)_560px_180px] xl:items-start">
+                <label className="grid grid-rows-[16px_40px_16px] gap-1 text-xs font-extrabold text-[#6c655b]">
+                  <span className="leading-4">검색기준</span>
+                  <div className="min-h-10 rounded-lg border border-black/10 bg-white px-3 py-2 text-sm font-bold text-[#151515]">
+                    {manualReviewProduct.searchKeyword || manualReviewProduct.title || "-"}
+                  </div>
+                  <span className="min-h-4" aria-hidden="true" />
+                </label>
+                <div className="grid gap-3 sm:grid-cols-2 sm:gap-x-5">
+                  <label className="grid grid-rows-[16px_40px_16px] gap-1 text-xs font-extrabold text-[#6c655b]">
+                    <span className="leading-4">확인한 최저 경쟁가</span>
+                    <input
+                    value={manualReviewLowestPrice}
+                    onChange={(event) => void updateManualLowestPrice(manualReviewProduct, event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        void saveManualReviewAndNext(manualReviewProduct);
+                      }
+                    }}
+                    inputMode="numeric"
+                    placeholder="예: 18900"
+                      className="min-h-10 rounded-lg border border-black/10 bg-white px-3 text-sm font-extrabold text-[#151515] outline-none transition placeholder:text-[#aaa39a] focus:border-[#2d73ff]"
+                    />
+                    <span className="min-h-4" aria-hidden="true" />
+                  </label>
+                  <label className="grid grid-rows-[16px_40px_16px] gap-1 text-xs font-extrabold text-[#6c655b]">
+                    <span className="leading-4">업로드 예정가</span>
+                    <input
+                    value={manualReviewSuggestedPrice}
+                    onChange={(event) => void updateManualPriceEdit(manualReviewProduct.id, event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        void saveManualReviewAndNext(manualReviewProduct);
+                      }
+                    }}
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    aria-invalid={isManualReviewUploadPriceInvalid}
+                      className={`min-h-10 rounded-lg border bg-white px-3 text-sm font-extrabold text-[#151515] outline-none transition ${
+                        isManualReviewUploadPriceInvalid
+                          ? "border-[#c43b2f] focus:border-[#c43b2f]"
+                          : "border-black/10 focus:border-[#2d73ff]"
+                      }`}
+                    />
+                    {isManualReviewUploadPriceInvalid ? (
+                      <span className="min-h-4 text-[11px] font-extrabold leading-4 text-[#c43b2f]">
+                        1엔 이상 숫자로 입력
+                      </span>
+                    ) : (
+                      <span className="min-h-4" aria-hidden="true" />
+                    )}
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void saveManualReviewAndNext(manualReviewProduct)}
+                  className="inline-flex min-h-10 items-center justify-center rounded-lg bg-[#2f9d62] px-4 text-sm font-extrabold text-white transition hover:bg-[#24784c] xl:mt-5"
+                >
+                  저장하고 다음
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-black/10 bg-[#fbfaf7] p-4 text-sm font-bold text-[#6c655b]">
+              BUYMA CSV를 업로드하거나 현재 보기 조건을 변경해 주세요.
+            </div>
+          )}
+        </section>
+
+        {manualReviewProducts.length ? (
+          <section className="overflow-hidden rounded-lg border border-black/10 bg-white shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/10 bg-[#fbfaf7] px-4 py-3">
+                <button
+                  type="button"
+                  onClick={() => setManualReviewListOpen((open) => !open)}
+                  className="inline-flex min-h-8 items-center justify-center rounded-lg border border-black/15 bg-white px-3 text-sm font-extrabold text-[#151515] transition hover:border-black/30"
+                >
+                  {manualReviewListOpen ? "검토 목록 접기" : "검토 목록 펼치기"}
+                </button>
+                {manualReviewListOpen ? (
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-[#6c655b]">
+                  <span>
+                    {manualReviewListStart.toLocaleString()}-{manualReviewListEnd.toLocaleString()} / {manualReviewProducts.length.toLocaleString()}개
+                  </span>
+                  <select
+                    value={String(manualReviewListPageSize)}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setManualReviewListPageSize(value === "all" ? "all" : (Number(value) as ManualReviewListPageSize));
+                      setManualReviewListPage(1);
+                    }}
+                    className="min-h-8 rounded-lg border border-black/10 bg-white px-2 text-xs font-extrabold text-[#151515] outline-none transition focus:border-[#2d73ff]"
+                    aria-label="검토 목록 표시 개수"
+                  >
+                    <option value="10">10개 보기</option>
+                    <option value="30">30개 보기</option>
+                    <option value="50">50개 보기</option>
+                    <option value="100">100개 보기</option>
+                    <option value="300">300개 보기</option>
+                    <option value="500">500개 보기</option>
+                    <option value="all">전체 보기</option>
+                  </select>
+                  <button
+                    type="button"
+                    disabled={safeManualReviewListPage <= 1}
+                    onClick={() => setManualReviewListPage((page) => Math.max(1, page - 1))}
+                    className="inline-flex min-h-8 items-center justify-center rounded-lg border border-black/15 bg-white px-2 text-xs font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    이전
+                  </button>
+                  <span>
+                    {safeManualReviewListPage.toLocaleString()} / {manualReviewListTotalPages.toLocaleString()}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={safeManualReviewListPage >= manualReviewListTotalPages}
+                    onClick={() => setManualReviewListPage((page) => Math.min(manualReviewListTotalPages, page + 1))}
+                    className="inline-flex min-h-8 items-center justify-center rounded-lg border border-black/15 bg-white px-2 text-xs font-extrabold text-[#151515] transition hover:border-black/30 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    다음
+                  </button>
+                  </div>
+                ) : null}
+              </div>
+              {manualReviewListOpen ? (
+              <div className="max-h-[620px] overflow-auto">
+                <table className="min-w-[1020px] w-full border-collapse text-left text-sm">
+                  <thead className="sticky top-0 z-10 bg-white text-xs font-extrabold text-[#6c655b] shadow-[0_1px_0_rgba(0,0,0,0.1)]">
+                    <tr>
+                      <th className="w-16 px-4 py-3">No</th>
+                      <th className="px-4 py-3">상품</th>
+                      <th className="px-4 py-3">상태</th>
+                      <th className="px-4 py-3">바이마 현재가</th>
+                      <th className="px-4 py-3">업로드 예정가</th>
+                      <th className="px-4 py-3">검토완료일</th>
+                      <th className="px-4 py-3 text-right">작업</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-black/10 bg-white">
+                    {manualReviewListProducts.map((product, index) => {
+                      const isReviewed = manualReviewedIds.has(product.id);
+                      const isRecheck = manualRecheckIds.has(product.id);
+                      const isCurrent = product.id === manualReviewProduct?.id;
+                      const manualUpdatePrice = getManualReviewPriceEditValue(product, manualPriceEdits);
+                      const uploadPrice = getPositiveIntegerPrice(manualUpdatePrice);
+                      const hasPriceChange = uploadPrice !== null && hasExportPriceChange(product, uploadPrice);
+                      const reviewStatus = getManualReviewStatus(isReviewed, isRecheck);
+                      const rowNumber = manualReviewProducts.length - (manualReviewListStart + index - 1);
+                      return (
+                        <tr key={product.id} className={isCurrent ? "bg-[#eef3ff]" : undefined}>
+                          <td className="px-4 py-3 align-top text-xs font-extrabold text-[#8a8378]">
+                            {rowNumber.toLocaleString()}
+                          </td>
+                          <td className="min-w-[420px] px-4 py-3 align-top">
+                            <div className="font-extrabold text-[#151515]">{product.title || product.buymaProductId || "제목 없음"}</div>
+                            <div className="mt-1 flex flex-wrap gap-2 text-xs font-bold text-[#6c655b]">
+                              {product.brand ? <span>브랜드 {product.brand}</span> : null}
+                              {product.modelNumber ? <span>모델번호 {product.modelNumber}</span> : null}
+                              {product.buymaProductId ? <span>상품ID {product.buymaProductId}</span> : null}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 align-top">
+                            <StatusPill tone={reviewStatus.tone} label={reviewStatus.label} />
+                          </td>
+                          <td className="px-4 py-3 align-top font-extrabold text-[#174bb8]">{formatYen(product.ownPrice)}</td>
+                          <td className="px-4 py-3 align-top">
+                            {uploadPrice === null ? (
+                              <span className="font-bold text-[#c43b2f]">미입력</span>
+                            ) : hasPriceChange ? (
+                              <span className="font-extrabold text-[#2d73ff]">{formatYen(uploadPrice)}</span>
+                            ) : (
+                              <span className="font-bold text-[#8a8378]">변경 없음</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 align-top text-xs font-bold text-[#6c655b]">
+                            {isRecheck && manualRecheckRequestedAt[product.id]
+                              ? formatDateTime(manualRecheckRequestedAt[product.id])
+                              : manualReviewedAt[product.id]
+                                ? formatDateTime(manualReviewedAt[product.id])
+                                : "-"}
+                          </td>
+                          <td className="px-4 py-3 align-top">
+                            <div className="flex justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setManualReviewProductId(product.id)}
+                                className="inline-flex min-h-9 items-center justify-center rounded-lg border border-black/15 bg-white px-3 text-xs font-extrabold text-[#151515] transition hover:border-black/30"
+                              >
+                                보기
+                              </button>
+                              {isReviewed ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void requestManualRecheck(product)}
+                                  className="inline-flex min-h-9 items-center justify-center rounded-lg border border-[#d78b1f]/25 bg-white px-3 text-xs font-extrabold text-[#9a5c00] transition hover:border-[#d78b1f]"
+                                >
+                                  재검토로 변경
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => void completeManualReview(product)}
+                                  className="inline-flex min-h-9 items-center justify-center rounded-lg border border-[#2f9d62]/25 bg-white px-3 text-xs font-extrabold text-[#24784c] transition hover:border-[#2f9d62]"
+                                >
+                                  검토완료로 변경
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              ) : null}
+          </section>
+        ) : null}
+      </div>
+    );
   }
 
   return (
@@ -787,10 +1822,11 @@ export default function CompetitorPriceChecker() {
       </div>
 
       <section className="overflow-hidden rounded-lg border border-black/10 bg-white shadow-[0_16px_48px_rgba(61,48,35,0.08)]">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[1320px] border-collapse text-left text-sm">
-            <thead className="bg-[#f1eee6] text-xs font-extrabold text-[#6c655b]">
+        <div className="max-h-[620px] overflow-auto">
+          <table className="w-full min-w-[1380px] border-collapse text-left text-sm">
+            <thead className="sticky top-0 z-10 bg-[#f1eee6] text-xs font-extrabold text-[#6c655b] shadow-[0_1px_0_rgba(0,0,0,0.1)]">
               <tr>
+                <th className="w-16 px-4 py-3">No</th>
                 <th className="w-12 px-4 py-3">
                   <input
                     type="checkbox"
@@ -813,12 +1849,16 @@ export default function CompetitorPriceChecker() {
             </thead>
             <tbody>
               {currentPageProducts.length ? (
-                currentPageProducts.map((product) => {
+                currentPageProducts.map((product, index) => {
                   const priceStatus = getPriceStatus(product);
                   const isChecking = checkingIds.has(product.id);
+                  const rowNumber = sortedProducts.length - ((safeCurrentPage - 1) * pageSize + index);
 
                   return (
                     <tr key={product.id} className="border-t border-black/10 align-top">
+                      <td className="px-4 py-4 text-xs font-extrabold text-[#8a8378]">
+                        {rowNumber.toLocaleString()}
+                      </td>
                       <td className="px-4 py-4">
                         <input
                           type="checkbox"
@@ -923,7 +1963,7 @@ export default function CompetitorPriceChecker() {
                 })
               ) : (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center text-sm font-bold text-[#6c655b]">
+                  <td colSpan={10} className="px-4 py-12 text-center text-sm font-bold text-[#6c655b]">
                     {getEmptyMessage(filterMode)}
                   </td>
                 </tr>
@@ -960,6 +2000,7 @@ export default function CompetitorPriceChecker() {
           다음
         </button>
       </div>
+
     </div>
   );
 }
@@ -1032,6 +2073,28 @@ async function saveProductPatch(
     .eq("id", productId);
 }
 
+async function createManualReviewBatch(
+  userId: string,
+  filename: string,
+): Promise<ManualPriceReviewBatchRow> {
+  const batchName = `${new Date().toISOString().slice(0, 10)} ${filename}`;
+  const { data, error } = await supabase
+    .from("manual_price_review_batches")
+    .insert({
+      user_id: userId,
+      name: batchName,
+      source_filename: filename,
+    })
+    .select("id,name,source_filename,created_at")
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message ?? "수동검토 배치를 만들지 못했습니다.");
+  }
+
+  return data as ManualPriceReviewBatchRow;
+}
+
 function rowToProduct(row: CompetitorPriceProductRow): TrackedBuymaProduct {
   return {
     id: row.id,
@@ -1102,6 +2165,259 @@ function productPatchToRowPatch(patch: Partial<TrackedBuymaProduct>) {
   return row;
 }
 
+function manualReviewRowToProduct(row: ManualPriceReviewItemRow): TrackedBuymaProduct {
+  return {
+    id: row.id,
+    buymaProductId: row.buyma_product_id ?? "",
+    buymaUrl: row.buyma_url ?? "",
+    title: row.title ?? "",
+    brand: row.brand ?? "",
+    modelNumber: row.model_number ?? "",
+    ownPrice: row.own_price ?? 0,
+    searchKeyword: row.search_keyword ?? "",
+    searchUrl: row.search_url ?? "",
+    status: "active",
+    createdAt: row.created_at ?? undefined,
+    csvOrder: row.csv_order ?? undefined,
+    csvImportedAt: row.csv_imported_at ?? undefined,
+  };
+}
+
+function productToManualReviewInsertRow(
+  userId: string,
+  batchId: string,
+  product: TrackedBuymaProduct,
+) {
+  return {
+    user_id: userId,
+    batch_id: batchId,
+    merge_key: getMergeKey(product) || product.id,
+    buyma_product_id: product.buymaProductId,
+    buyma_url: product.buymaUrl,
+    title: product.title,
+    brand: product.brand,
+    model_number: product.modelNumber,
+    own_price: product.ownPrice,
+    search_keyword: product.searchKeyword,
+    search_url: product.searchUrl,
+    manual_update_price: product.ownPrice || null,
+    review_status: "pending",
+    csv_order: product.csvOrder ?? null,
+    csv_imported_at: product.csvImportedAt ?? null,
+  };
+}
+
+function mergeManualReviewImportRows(
+  userId: string,
+  batchId: string,
+  importedProducts: TrackedBuymaProduct[],
+  existingRows: ManualPriceReviewItemRow[],
+) {
+  const existingMap = new Map<string, ManualPriceReviewItemRow>();
+  existingRows.forEach((row) => {
+    existingMap.set(getManualReviewRowMergeKey(row), row);
+    existingMap.set(row.merge_key, row);
+  });
+
+  return importedProducts.map((product) => {
+    const mergeKey = getMergeKey(product) || product.id;
+    const existing = existingMap.get(mergeKey);
+    if (!existing) {
+      return productToManualReviewInsertRow(userId, batchId, product);
+    }
+
+    const shouldRecheck = shouldRecheckManualReviewItem(existing, product);
+    const recheckRequestedAt = shouldRecheck ? new Date().toISOString() : existing.recheck_requested_at;
+
+    return {
+      user_id: userId,
+      batch_id: batchId,
+      merge_key: mergeKey,
+      buyma_product_id: product.buymaProductId,
+      buyma_url: product.buymaUrl,
+      title: product.title,
+      brand: product.brand,
+      model_number: product.modelNumber,
+      own_price: product.ownPrice,
+      search_keyword: product.searchKeyword,
+      search_url: product.searchUrl,
+      manual_lowest_price: existing.manual_lowest_price,
+      manual_update_price: getMergedManualUpdatePrice(existing, product, shouldRecheck),
+      review_status: shouldRecheck ? "recheck" : existing.review_status,
+      reviewed_at: shouldRecheck ? null : existing.reviewed_at,
+      recheck_requested_at: recheckRequestedAt,
+      exported_at: shouldRecheck ? null : existing.exported_at,
+      csv_order: product.csvOrder ?? null,
+      csv_imported_at: product.csvImportedAt ?? null,
+    };
+  });
+}
+
+function dedupeManualReviewImportedProducts(products: TrackedBuymaProduct[]) {
+  const seenKeys = new Set<string>();
+  const uniqueProducts: TrackedBuymaProduct[] = [];
+  let duplicateCount = 0;
+
+  products.forEach((product) => {
+    const mergeKey = getMergeKey(product) || product.id;
+    if (seenKeys.has(mergeKey)) {
+      duplicateCount += 1;
+      return;
+    }
+
+    seenKeys.add(mergeKey);
+    uniqueProducts.push(product);
+  });
+
+  return {
+    products: uniqueProducts,
+    duplicateCount,
+  };
+}
+
+function getMergedManualUpdatePrice(
+  existing: ManualPriceReviewItemRow,
+  imported: TrackedBuymaProduct,
+  shouldRecheck: boolean,
+) {
+  if (existing.review_status === "reviewed" && shouldRecheck) {
+    return existing.manual_update_price ?? existing.own_price ?? imported.ownPrice ?? null;
+  }
+
+  const existingUpdatePrice = existing.manual_update_price ?? 0;
+  const existingOwnPrice = existing.own_price ?? 0;
+  const wasDefaultUpdatePrice = !existingUpdatePrice || existingUpdatePrice === existingOwnPrice;
+
+  if (wasDefaultUpdatePrice) {
+    return imported.ownPrice || null;
+  }
+
+  return existingUpdatePrice;
+}
+
+function getManualReviewRowMergeKey(row: ManualPriceReviewItemRow) {
+  return row.buyma_product_id || row.buyma_url || row.title || row.merge_key;
+}
+
+function shouldRecheckManualReviewItem(
+  existing: ManualPriceReviewItemRow,
+  imported: TrackedBuymaProduct,
+) {
+  if (existing.review_status !== "reviewed") return false;
+  if ((existing.search_url ?? "") !== imported.searchUrl) return true;
+
+  if (existing.manual_update_price && existing.manual_update_price > 0) {
+    return existing.manual_update_price !== imported.ownPrice;
+  }
+
+  return existing.own_price !== imported.ownPrice;
+}
+
+function getManualLowestPriceMap(rows: ManualPriceReviewItemRow[]) {
+  const result: Record<string, string> = {};
+  rows.forEach((row) => {
+    if (row.manual_lowest_price) result[row.id] = String(row.manual_lowest_price);
+  });
+  return result;
+}
+
+function getManualUpdatePriceMap(rows: ManualPriceReviewItemRow[]) {
+  const result: Record<string, string> = {};
+  rows.forEach((row) => {
+    const updatePrice = row.manual_update_price ?? row.own_price;
+    if (updatePrice) result[row.id] = String(updatePrice);
+  });
+  return result;
+}
+
+function getManualReviewPriceEditValue(
+  product: TrackedBuymaProduct,
+  priceEdits: Record<string, string>,
+) {
+  if (Object.prototype.hasOwnProperty.call(priceEdits, product.id)) {
+    return priceEdits[product.id] ?? "";
+  }
+
+  return product.ownPrice ? String(product.ownPrice) : "";
+}
+
+function getManualStatusIds(rows: ManualPriceReviewItemRow[], status: ManualReviewStatus) {
+  return new Set(rows.filter((row) => row.review_status === status).map((row) => row.id));
+}
+
+function getManualDateMap(
+  rows: ManualPriceReviewItemRow[],
+  key: "reviewed_at" | "recheck_requested_at",
+) {
+  const result: Record<string, string> = {};
+  rows.forEach((row) => {
+    const value = row[key];
+    if (value) result[row.id] = value;
+  });
+  return result;
+}
+
+function filterManualReviewSearch(products: TrackedBuymaProduct[], productSearch: string) {
+  const search = productSearch.trim().toLowerCase();
+  if (!search) return products;
+
+  return products.filter((product) =>
+    [product.title, product.buymaProductId].some((value) =>
+      value.toLowerCase().includes(search),
+    ),
+  );
+}
+
+function filterManualReviewProducts(
+  products: TrackedBuymaProduct[],
+  filterMode: ManualReviewFilterMode,
+  reviewedIds: Set<string>,
+  recheckIds: Set<string>,
+) {
+  return products.filter((product) => {
+    const isReviewed = reviewedIds.has(product.id);
+    const isRecheck = recheckIds.has(product.id);
+    if (filterMode === "pending") return !isReviewed && !isRecheck;
+    if (filterMode === "reviewed") return isReviewed;
+    if (filterMode === "recheck") return isRecheck;
+    return true;
+  });
+}
+
+function getManualReviewStatus(isReviewed: boolean, isRecheck: boolean) {
+  if (isRecheck) return { label: "재검토 필요", tone: "warning" as const };
+  if (isReviewed) return { label: "검토완료", tone: "ok" as const };
+  return { label: "검토대기", tone: "muted" as const };
+}
+
+function sortManualReviewProducts(
+  products: TrackedBuymaProduct[],
+  sortMode: ManualReviewSortMode,
+  reviewedAt: Record<string, string>,
+) {
+  return [...products].sort((a, b) => {
+    switch (sortMode) {
+      case "csvReverse":
+        return compareDateDesc(a.csvImportedAt, b.csvImportedAt) || compareNumberDesc(a.csvOrder, b.csvOrder) || compareTitle(a, b);
+      case "title":
+        return compareTitle(a, b);
+      case "oldestReviewed":
+        return compareManualReviewedAtAsc(a, b, reviewedAt) || compareTitle(a, b);
+      case "csv":
+      default:
+        return compareDateDesc(a.csvImportedAt, b.csvImportedAt) || compareNumberAsc(a.csvOrder, b.csvOrder) || compareTitle(a, b);
+    }
+  });
+}
+
+function compareManualReviewedAtAsc(
+  a: TrackedBuymaProduct,
+  b: TrackedBuymaProduct,
+  reviewedAt: Record<string, string>,
+) {
+  return getOptionalTime(reviewedAt[a.id]) - getOptionalTime(reviewedAt[b.id]);
+}
+
 function filterTrackedProducts(
   products: TrackedBuymaProduct[],
   filterMode: ProductFilterMode,
@@ -1136,6 +2452,16 @@ function filterTrackedProducts(
 
 function getProductLabel(product: TrackedBuymaProduct) {
   return product.title || product.buymaProductId || "상품";
+}
+
+function getBuymaReviewUrl(product: TrackedBuymaProduct) {
+  return (
+    product.lastSearchUrl ||
+    product.searchUrl ||
+    (product.searchKeyword ? buildBuymaSearchUrl(product.searchKeyword) : "") ||
+    (product.title ? buildBuymaSearchUrl(product.title) : "") ||
+    product.buymaUrl
+  );
 }
 
 function getEmptyMessage(filterMode: ProductFilterMode) {
@@ -1229,9 +2555,44 @@ function getCheckedTimeForSort(value: string | undefined) {
   return Number.isNaN(time) ? Number.MAX_SAFE_INTEGER : time;
 }
 
+function getOptionalTime(value: string | undefined) {
+  if (!value) return Number.MAX_SAFE_INTEGER;
+
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? Number.MAX_SAFE_INTEGER : time;
+}
+
 function getExportPrice(product: TrackedBuymaProduct, editedPrice: string | undefined) {
-  const price = Number(editedPrice || getDefaultEditPrice(product) || product.referencePrice || product.ownPrice);
-  return Number.isFinite(price) && price > 0 ? Math.floor(price) : 0;
+  const price =
+    editedPrice === undefined
+      ? Number(getDefaultEditPrice(product) || product.referencePrice || product.ownPrice)
+      : Number(editedPrice);
+  return getPositiveIntegerPrice(price) ?? 0;
+}
+
+function hasExportPriceChange(product: TrackedBuymaProduct, exportPrice: number) {
+  const currentPrice = Number(product.ownPrice);
+  return Number.isFinite(currentPrice) && currentPrice > 0 && Math.floor(currentPrice) !== exportPrice;
+}
+
+function getPositiveIntegerPrice(value: string | number | null | undefined) {
+  const price = Number(value);
+  return Number.isFinite(price) && price > 0 ? Math.floor(price) : null;
+}
+
+function countPriceUpdateCsvRows(
+  products: TrackedBuymaProduct[],
+  editedPrices: Record<string, string>,
+  requirePriceChange = false,
+) {
+  return products.reduce((count, product) => {
+    const productId = product.buymaProductId.trim();
+    const price = getExportPrice(product, editedPrices[product.id]);
+
+    if (!productId || !price) return count;
+    if (requirePriceChange && !hasExportPriceChange(product, price)) return count;
+    return count + 1;
+  }, 0);
 }
 
 function getPriceEditValue(product: TrackedBuymaProduct, priceEdits: Record<string, string>) {
@@ -1316,7 +2677,10 @@ async function readFileText(file: File) {
   }
 }
 
-function parseProductsFromCsv(text: string) {
+function parseProductsFromCsv(
+  text: string,
+  options: { requireBuymaProductId?: boolean } = {},
+) {
   const rows = parseDelimitedRows(text.trim().replace(/^\uFEFF/, ""));
   if (rows.length < 2) {
     return {
@@ -1358,6 +2722,15 @@ function parseProductsFromCsv(text: string) {
     const ownPrice = parseNumber(getCell(row, headers, ["ownPrice", "price", "sellingPrice"]));
     const searchKeyword = getCell(row, headers, ["searchKeyword", "keyword"]);
     const searchUrl = getCell(row, headers, ["searchUrl"]);
+
+    if (options.requireBuymaProductId && !buymaProductId) {
+      failures.push({
+        rowNumber: index + 2,
+        reason: "BUYMA 상품ID가 없어 수동검토 목록에 넣을 수 없습니다.",
+        rawValue: row.join(" | "),
+      });
+      return;
+    }
 
     if (!buymaProductId && !buymaUrl && !title) {
       failures.push({
@@ -1627,4 +3000,8 @@ function formatDateTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function getManualReviewBatchFilename(value: string) {
+  return value.replace(/^\d{4}-\d{2}-\d{2}\s+/, "").trim();
 }

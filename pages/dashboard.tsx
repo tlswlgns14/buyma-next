@@ -10,6 +10,7 @@ import { formatAccessDate, isAccessExpired } from "@/lib/access";
 type DashboardMenuKey =
   | "product-management"
   | "competitor-prices"
+  | "manual-price-review"
   | "sourcing-sites"
   | "image-server-guide";
 
@@ -31,6 +32,11 @@ const dashboardMenus: DashboardMenu[] = [
     title: "경쟁가격확인",
   },
   {
+    key: "manual-price-review",
+    label: "수동가격검토",
+    title: "수동가격검토",
+  },
+  {
     key: "sourcing-sites",
     label: "소싱사이트내역",
     title: "소싱사이트내역",
@@ -41,6 +47,8 @@ const dashboardMenus: DashboardMenu[] = [
     title: "이미지 서버 설정가이드",
   },
 ];
+
+const DEFAULT_DASHBOARD_MENU: DashboardMenuKey = "product-management";
 
 const sourcingSites = [
   {
@@ -109,7 +117,7 @@ export default function Dashboard() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [activeMenu, setActiveMenu] =
-    useState<DashboardMenuKey>("product-management");
+    useState<DashboardMenuKey>(DEFAULT_DASHBOARD_MENU);
   const { authUser, loading, signOut, user } = useAuth();
   const router = useRouter();
   const displayName = getDisplayName(user?.username, authUser?.user_metadata);
@@ -117,9 +125,12 @@ export default function Dashboard() {
   const canUseCompetitorPrices = Boolean(user?.can_use_competitor_prices);
   const visibleDashboardMenus = canUseCompetitorPrices
     ? dashboardMenus
-    : dashboardMenus.filter((menu) => menu.key !== "competitor-prices");
+    : dashboardMenus.filter(
+        (menu) => menu.key !== "competitor-prices" && menu.key !== "manual-price-review",
+      );
   const effectiveActiveMenu =
-    !canUseCompetitorPrices && activeMenu === "competitor-prices"
+    !canUseCompetitorPrices &&
+    (activeMenu === "competitor-prices" || activeMenu === "manual-price-review")
       ? "product-management"
       : activeMenu;
   const activeMenuItem = visibleDashboardMenus.find(
@@ -135,6 +146,18 @@ export default function Dashboard() {
     }
   }, [authUser, loading, router]);
 
+  useEffect(() => {
+    if (!router.isReady) return;
+
+    const queryMenu = Array.isArray(router.query.menu)
+      ? router.query.menu[0]
+      : router.query.menu;
+
+    if (isDashboardMenuKey(queryMenu)) {
+      setActiveMenu(queryMenu);
+    }
+  }, [router.isReady, router.query.menu]);
+
   async function handleSignOut() {
     setSigningOut(true);
 
@@ -144,6 +167,18 @@ export default function Dashboard() {
     } finally {
       setSigningOut(false);
     }
+  }
+
+  function handleMenuClick(menuKey: DashboardMenuKey) {
+    setActiveMenu(menuKey);
+    void router.replace(
+      {
+        pathname: router.pathname,
+        query: { ...router.query, menu: menuKey },
+      },
+      undefined,
+      { shallow: true },
+    );
   }
 
   if (loading || !authUser) {
@@ -225,7 +260,7 @@ export default function Dashboard() {
             <button
               key={menu.key}
               type="button"
-              onClick={() => setActiveMenu(menu.key)}
+              onClick={() => handleMenuClick(menu.key)}
               className={`flex min-h-11 w-full items-center rounded-lg px-4 text-left text-sm font-extrabold transition ${
                 effectiveActiveMenu === menu.key
                   ? "bg-[#151515] text-white"
@@ -302,6 +337,8 @@ function renderDashboardContent(
       return <ProductManager />;
     case "competitor-prices":
       return canUseCompetitorPrices ? <CompetitorPriceChecker /> : null;
+    case "manual-price-review":
+      return canUseCompetitorPrices ? <CompetitorPriceChecker mode="manual-review" /> : null;
     case "sourcing-sites":
       return <SourcingSitesPanel />;
     case "image-server-guide":
@@ -309,6 +346,13 @@ function renderDashboardContent(
     default:
       return null;
   }
+}
+
+function isDashboardMenuKey(value: unknown): value is DashboardMenuKey {
+  return (
+    typeof value === "string" &&
+    dashboardMenus.some((menu) => menu.key === value)
+  );
 }
 
 function ImageServerGuidePanel() {
