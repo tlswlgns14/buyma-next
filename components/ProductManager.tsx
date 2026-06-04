@@ -912,7 +912,12 @@ function BasicInfoPanel({
 
         <div className="buyma-form-grid col3">
           <Field label="판매가격(円)">
-            <input className="buyma-required-red" type="number" value={product?.sellingPrice || calculatedPrice || 0} onChange={(event) => onChange({ sellingPrice: Number(event.target.value) || undefined })} />
+            <input
+              className="buyma-required-red"
+              type="number"
+              value={product && Object.hasOwn(product, "sellingPrice") ? product.sellingPrice ?? "" : calculatedPrice || 0}
+              onChange={(event) => onChange({ sellingPrice: event.target.value === "" ? undefined : Number(event.target.value) || 0 })}
+            />
           </Field>
           {product?.unisex ? (
             <>
@@ -3133,7 +3138,7 @@ function hasDirtyField(dirtyFields: ProductDirtyFields, keys: Array<keyof Produc
 
 function normalizeProduct(product: ProductDraft, settings: BuymaSettings, index: number): ProductDraft {
   const brandedProduct = applyBuymaBrand(product);
-  const sellingPrice = calculateSellingPrice(product.price, settings.marginRate, settings.exchangeRate);
+  const sellingPrice = product.sellingPrice || calculateSellingPrice(product.price, settings.marginRate, settings.exchangeRate);
   const colors = resolveProductTitleColors(brandedProduct);
   const productTitle = product.titleManuallyEdited
     ? normalizeTitlePart(product.title) || buildCollectedProductTitle(brandedProduct, colors, settings.productTitlePrefix)
