@@ -2,7 +2,6 @@ import { MEASUREMENT_HEADERS } from "./data";
 import { BUYMA_SIZES, BUYMA_SIZE_DETAILS } from "./id-data";
 import { findBuymaBrand } from "./brands";
 import { getJapaneseBrandDescription } from "./brand-descriptions";
-import { resolveUnisexBuymaCategories } from "./categories";
 import type { BuymaDescriptionPlacement, BuymaSettings, ColorSizeRow, CsvBundle, ProductDraft, StockStatus } from "./types";
 import {
   calculateSellingPrice,
@@ -14,6 +13,7 @@ import {
   normalizeStockStatus,
   sanitizeForCsv,
   splitListInput,
+  splitColorSizeSupplementFromDescription,
   truncateByByteLength,
 } from "./text";
 
@@ -51,8 +51,8 @@ const ITEMS_HEADERS = [
   "出品メモ",
   ...Array.from({ length: 20 }, (_, index) => `商品イメージ${index + 1}`),
   ...Array.from({ length: 10 }, (_, index) => [
-    `ブランド型番${index + 1}`,
-    `ブランド型番識別メモ${index + 1}`,
+    `ブランド品番${index + 1}`,
+    `ブランド品番識別メモ${index + 1}`,
   ]).flat(),
   ...Array.from({ length: 15 }, (_, index) => [
     `買付先名${index + 1}`,
@@ -62,6 +62,7 @@ const ITEMS_HEADERS = [
 ];
 
 const ITEM_DESCRIPTION_COLUMN_INDEX = ITEMS_HEADERS.indexOf("商品コメント");
+const ITEM_COLOR_SIZE_SUPPLEMENT_COLUMN_INDEX = ITEMS_HEADERS.indexOf("色サイズ補足");
 
 const COLOR_SIZE_MEASUREMENT_HEADERS = [
   "着丈",
@@ -137,12 +138,13 @@ const COLORSIZES_HEADERS = [
   "色サイズリプレイス",
   ...COLOR_SIZE_MEASUREMENT_HEADERS,
 ];
+const COLORSIZES_COLOR_SIZE_SUPPLEMENT_COLUMN_INDEX = COLORSIZES_HEADERS.indexOf("色サイズ補足");
 
 export function generateBuymaCsvBundle(
   products: ProductDraft[],
   settings: BuymaSettings,
 ): CsvBundle {
-  const productsWithSku = expandBuymaCsvProducts(products).map((product, index) => ({
+  const productsWithSku = products.map((product, index) => ({
     ...product,
     skuNumber: product.skuNumber || makeSku(index, product.productCode),
   }));
@@ -154,42 +156,7 @@ export function generateBuymaCsvBundle(
 }
 
 export function getBuymaCsvProductSourceIndexes(products: ProductDraft[]) {
-  return products.flatMap((product, index) =>
-    shouldExpandUnisexProduct(product) ? [index, index] : [index],
-  );
-}
-
-function expandBuymaCsvProducts(products: ProductDraft[]) {
-  return products.flatMap((product, index) => {
-    if (!shouldExpandUnisexProduct(product)) return [product];
-
-    const { menCategory, womenCategory } = resolveUnisexBuymaCategories(product);
-    const baseSku = product.skuNumber || makeSku(index, product.productCode);
-
-    return [
-      makeUnisexCsvProduct(product, menCategory, `${baseSku}-M`),
-      makeUnisexCsvProduct(product, womenCategory, `${baseSku}-W`),
-    ];
-  });
-}
-
-function shouldExpandUnisexProduct(product: ProductDraft) {
-  if (!product.unisex) return false;
-
-  const { menCategory, womenCategory } = resolveUnisexBuymaCategories(product);
-  return Boolean(menCategory && womenCategory);
-}
-
-function makeUnisexCsvProduct(product: ProductDraft, category: string, skuNumber: string): ProductDraft {
-  return {
-    ...product,
-    category,
-    skuNumber,
-    sizeTableData: product.sizeTableData?.map((row) => ({
-      ...row,
-      sizeTypeId: "",
-    })),
-  };
+  return products.map((_, index) => index);
 }
 
 export function generateItemsCsv(products: ProductDraft[], settings: BuymaSettings) {
@@ -198,6 +165,7 @@ export function generateItemsCsv(products: ProductDraft[], settings: BuymaSettin
     const title = truncateBuymaTitle(normalizeBuymaTitle(product, settings.productTitlePrefix));
     const sellingPrice = resolveSellingPrice(product, settings);
     const description = buildDescription(product, settings.productDescriptionPrefix, settings.productDescriptionPlacement);
+    const colorSizeSupplement = resolveColorSizeSupplement(product);
     const imageSlots = getImageSlots(product, index);
     const brandInfo = findBuymaBrand(product.brand || product.brandDisplayName || title);
     const brandId = product.brandId ? product.brandId : brandInfo?.id || "0";
@@ -223,7 +191,7 @@ export function generateItemsCsv(products: ProductDraft[], settings: BuymaSettin
       referencePrice,
       referencePrice,
       truncateByByteLength(description, 3000),
-      "",
+      colorSizeSupplement,
       "",
       resolveShippingMethod(product.shippingMethod, settings),
       resolveAreaCode(product.purchaseArea),
@@ -302,7 +270,7 @@ export function generateItemsCsv(products: ProductDraft[], settings: BuymaSettin
     ];
   });
 
-  return toCsv([ITEMS_HEADERS, ...rows], new Set([ITEM_DESCRIPTION_COLUMN_INDEX]));
+  return toCsv([ITEMS_HEADERS, ...rows], getItemsPreserveNewlineColumns());
 }
 
 export function generateColorSizesCsv(products: ProductDraft[], settings: BuymaSettings) {
@@ -345,7 +313,21 @@ export function generateColorSizesCsv(products: ProductDraft[], settings: BuymaS
     });
   });
 
-  return toCsv([COLORSIZES_HEADERS, ...rows]);
+  return toCsv([COLORSIZES_HEADERS, ...rows], getColorSizesPreserveNewlineColumns());
+}
+
+function getItemsPreserveNewlineColumns() {
+  return new Set(
+    [ITEM_DESCRIPTION_COLUMN_INDEX, ITEM_COLOR_SIZE_SUPPLEMENT_COLUMN_INDEX]
+      .filter((index) => index >= 0),
+  );
+}
+
+function getColorSizesPreserveNewlineColumns() {
+  return new Set(
+    [COLORSIZES_COLOR_SIZE_SUPPLEMENT_COLUMN_INDEX]
+      .filter((index) => index >= 0),
+  );
 }
 
 function resolveSellingPrice(product: ProductDraft, settings: BuymaSettings) {
@@ -394,10 +376,11 @@ function resolveSizeTypeId(categoryId: unknown, size: unknown) {
   const normalizedSize = normalizeSizeName(size);
   if (!category || !normalizedSize) return "";
 
-  const matched = BUYMA_SIZES.find(
-    (entry) => entry.categoryId === category && normalizeSizeName(entry.name) === normalizedSize,
-  );
-  return matched?.id ?? "";
+  const categorySizes = BUYMA_SIZES.filter((entry) => entry.categoryId === category);
+  if (!categorySizes.length) return "0";
+
+  const matched = categorySizes.find((entry) => normalizeSizeName(entry.name) === normalizedSize);
+  return matched?.id ?? "0";
 }
 
 function normalizeSizeName(value: unknown) {
@@ -420,18 +403,16 @@ function normalizeBuymaTitle(product: ProductDraft, prefix = "") {
   const titlePrefix = normalizeTitlePart(prefix);
   const source = normalizeTitlePart(product.translatedTitle || product.titleEn || product.title || product.titleKo);
   const brand = resolveTitleBrand(product, source);
-  const bracketedBrand = brand ? `【${brand}】` : "";
-  const colors = resolveTitleColors(product);
-  const colorSuffix = colors.length > 1 ? `(${colors.length}colors)` : colors[0] ? `(${colors[0]})` : "";
+  const bracketedBrand = brand ? `[${brand}]` : "";
   const strippedTitle = stripBrandFromTitle(source, brand);
   const rawProductName =
-    stripTitlePrefix(stripTrailingColor(strippedTitle, colors), titlePrefix) ||
+    stripTitlePrefix(stripTrailingColorCount(strippedTitle), titlePrefix) ||
     stripTitlePrefix(strippedTitle, titlePrefix) ||
     "Fashion Item";
   const productName =
     product.site === "thenorthfacekorea.co.kr" ? appendProductCodeToTitle(rawProductName, product.productCode) : rawProductName;
 
-  return joinTitleParts(bracketedBrand, titlePrefix, productName, colorSuffix);
+  return joinTitleParts(bracketedBrand, titlePrefix, productName);
 }
 
 function appendProductCodeToTitle(title: string, productCode: unknown) {
@@ -463,27 +444,18 @@ function resolveTitleBrand(product: ProductDraft, sourceTitle: string) {
 function stripBrandFromTitle(title: string, brand: string) {
   if (!title) return title;
   if (!brand) {
-    return title.replace(new RegExp(`^[\\[【][^\\]】]+[\\]】]\\s*`), "").trim();
+    return title.replace(new RegExp(`^[\\[【(][^\\]】)]+[\\]】)]\\s*`), "").trim();
   }
   const escapedBrand = escapeRegExp(brand);
 
   return title
-    .replace(new RegExp(`^[\\[【]?${escapedBrand}[\\]】]?\\s*[-_:|]*\\s*`, "i"), "")
-    .replace(new RegExp(`^[\\[【][^\\]】]+[\\]】]\\s*`), "")
+    .replace(new RegExp(`^[\\[【(]?${escapedBrand}[\\]】)]?\\s*[-_:|]*\\s*`, "i"), "")
+    .replace(new RegExp(`^[\\[【(][^\\]】)]+[\\]】)]\\s*`), "")
     .trim();
 }
 
-function stripTrailingColor(title: string, colors: string[]) {
-  let result = title.replace(/\s*\(\d+colors\)\s*$/i, "").trim();
-  colors.forEach((color) => {
-    if (!color) return;
-    const escapedColor = escapeRegExp(color);
-    result = result
-      .replace(new RegExp(`\\s*\\(${escapedColor}\\)\\s*$`, "i"), "")
-      .replace(new RegExp(`\\s+${escapedColor}\\s*$`, "i"), "")
-      .trim();
-  });
-  return result;
+function stripTrailingColorCount(title: string) {
+  return title.replace(/\s*\(\d+\s*colors?\)\s*$/i, "").trim();
 }
 
 function stripTitlePrefix(title: string, prefix: string) {
@@ -492,30 +464,8 @@ function stripTitlePrefix(title: string, prefix: string) {
   return title.replace(new RegExp(`^${escapedPrefix}\\s+`, "i"), "").trim();
 }
 
-function resolveTitleColors(product: ProductDraft) {
-  const colorCandidates = [
-    ...(product.colors ?? []),
-    ...(product.sizeTableData?.map((row) => row.color) ?? []),
-  ].flatMap((color) => splitListInput(color));
-  const explicitColors = uniqueTextList(colorCandidates.map(convertColorToEnglish))
-    .filter((color) => color && color !== "FREE" && color !== "ONE SIZE");
-  if (explicitColors.length) return explicitColors;
-
-  const titleColor = extractColorFromTitle(product.title || product.titleKo || product.titleEn || "");
-  return titleColor ? [convertColorToEnglish(titleColor)] : [];
-}
-
-function extractColorFromTitle(title: string) {
-  const normalized = normalizeTitlePart(title);
-  const parenMatch = normalized.match(/\(([^()]{2,30})\)\s*$/);
-  if (parenMatch?.[1] && !/\d+\s*colors?/i.test(parenMatch[1])) return parenMatch[1];
-
-  const matches = normalized.match(/\b(BLACK|WHITE|CREAM|IVORY|BEIGE|BROWN|GRAY|GREY|NAVY|BLUE|GREEN|RED|PINK|YELLOW|PURPLE|MINT|KHAKI|ORANGE|SILVER|GOLD)\b/gi);
-  return matches?.at(-1) ?? "";
-}
-
 function extractBracketBrand(title: string) {
-  return title.match(/[【\[]([^】\]]+)[】\]]/)?.[1] ?? "";
+  return title.match(/[【\[(]([^】\])]+)[】\])]/)?.[1] ?? "";
 }
 
 function joinTitleParts(...parts: Array<string | undefined>) {
@@ -528,13 +478,9 @@ function joinTitleParts(...parts: Array<string | undefined>) {
 function normalizeTitlePart(value: unknown) {
   return cleanText(value)
     .replace(/[_/|]+/g, " ")
-    .replace(/\s*[-:]\s*/g, " ")
+    .replace(/\s*:\s*/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function uniqueTextList(values: string[]) {
-  return [...new Set(values.map((value) => cleanText(value)).filter(Boolean))];
 }
 
 function escapeRegExp(value: string) {
@@ -542,11 +488,34 @@ function escapeRegExp(value: string) {
 }
 
 function buildDescription(product: ProductDraft, descriptionPrefix = "", placement: BuymaDescriptionPlacement = "before") {
-  return applyDescriptionPrefix(
+  const separated = splitColorSizeSupplementFromDescription(
     getJapaneseBrandDescription(product) || product.description || "",
+  );
+
+  return applyDescriptionPrefix(
+    separated.description,
     descriptionPrefix,
     placement,
   );
+}
+
+function resolveColorSizeSupplement(product: ProductDraft) {
+  const separated = splitColorSizeSupplementFromDescription(product.description);
+  return [product.colorSizeSupplement, separated.colorSizeSupplement]
+    .map((value) => cleanMultilineText(value))
+    .filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .join("\n\n");
+}
+
+function cleanMultilineText(value: unknown) {
+  return String(value ?? "")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => cleanText(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function applyDescriptionPrefix(
@@ -756,11 +725,15 @@ function formatMeasurementNumber(value: number) {
 }
 
 function getImageSlots(product: ProductDraft, _productIndex: number) {
-  const uploaded = product.uploadedImageUrls ?? [];
-  const originals = (product.images ?? []).filter((image) => image && image !== product.editedImage);
+  const uploaded = compactImageUrls(product.uploadedImageUrls ?? []);
+  const originals = compactImageUrls((product.images ?? []).filter((image) => image !== product.editedImage));
   const slots = uploaded.some(Boolean) ? uploaded : originals;
 
   return Array.from({ length: 20 }, (_, index) => slots[index] ?? "");
+}
+
+function compactImageUrls(images: string[]) {
+  return images.map((image) => cleanText(image)).filter(Boolean);
 }
 
 function getPurchaseDeadline(baseDate?: string) {

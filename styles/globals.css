@@ -307,6 +307,20 @@ a {
   outline: none;
 }
 
+.buyma-title-limit-warning {
+  color: #ff0000;
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: -4px;
+}
+
+.buyma-description-supplement-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.85fr);
+  gap: 12px;
+  margin-top: 6px;
+}
+
 .buyma-category-combo {
   position: relative;
 }
@@ -1420,6 +1434,10 @@ a {
   }
 
   .buyma-panel-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .buyma-description-supplement-grid {
     grid-template-columns: 1fr;
   }
 }

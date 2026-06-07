@@ -31,7 +31,9 @@ async function extractYouthisyoursProduct(url: URL): Promise<ProductDraft> {
   const rawDescriptionKo = normalizeTextBlock(
     stringValue(jsonLd?.description) || extractMeta(html, "description") || extractMeta(html, "og:description"),
   );
-  const descriptionKo = normalizeYouthisyoursDescriptionMeasurements(rawDescriptionKo);
+  const normalizedDescriptionKo = normalizeYouthisyoursDescriptionMeasurements(rawDescriptionKo);
+  const colorSizeSupplement = extractColorSizeSupplement(normalizedDescriptionKo);
+  const descriptionKo = removeColorSizeSupplementBlock(normalizedDescriptionKo);
   const price = parsePrice(firstOfferValue(jsonLd, "price") || extractCafe24Variable(html, "product_price"));
   const colors = resolveColors(rawDescriptionKo, title);
   const sizeMeasurements = parseSizeMeasurements(rawDescriptionKo);
@@ -64,6 +66,7 @@ async function extractYouthisyoursProduct(url: URL): Promise<ProductDraft> {
     productCode: productNo,
     descriptionKo,
     description: "",
+    colorSizeSupplement,
     stockStatus,
     optionStockMap,
     ...(Object.keys(sizeMeasurements).length ? { sizeMeasurements } : {}),
@@ -291,6 +294,47 @@ function normalizeYouthisyoursDescriptionMeasurements(description: string) {
     )
     .join("\n")
     .trim();
+}
+
+function extractColorSizeSupplement(description: string) {
+  const lines = getDescriptionLines(description);
+  const sizeIndex = lines.findIndex((line) => /^SIZE$/i.test(line));
+  if (sizeIndex < 0) return "";
+
+  const colorIndex = lines.findIndex((line, index) => index <= sizeIndex && /^COLOR\s*\|/i.test(line));
+  const startIndex = colorIndex >= 0 ? colorIndex : sizeIndex;
+  const endIndex = findColorSizeSupplementEndIndex(lines, sizeIndex + 1);
+
+  return lines.slice(startIndex, endIndex).join("\n").trim();
+}
+
+function removeColorSizeSupplementBlock(description: string) {
+  const lines = getDescriptionLines(description);
+  const sizeIndex = lines.findIndex((line) => /^SIZE$/i.test(line));
+  if (sizeIndex < 0) return description;
+
+  const colorIndex = lines.findIndex((line, index) => index <= sizeIndex && /^COLOR\s*\|/i.test(line));
+  const startIndex = colorIndex >= 0 ? colorIndex : sizeIndex;
+  const endIndex = findColorSizeSupplementEndIndex(lines, sizeIndex + 1);
+
+  return [...lines.slice(0, startIndex), ...lines.slice(endIndex)].join("\n").trim();
+}
+
+function findColorSizeSupplementEndIndex(lines: string[], fromIndex: number) {
+  for (let index = fromIndex; index < lines.length; index += 1) {
+    if (/^(COMPOSITION|MODEL\s*\||FABRIC|CARE|MATERIAL|MADE\s+IN)\b/i.test(lines[index])) {
+      return index;
+    }
+  }
+  return lines.length;
+}
+
+function getDescriptionLines(description: string) {
+  return description
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => cleanText(line))
+    .filter(Boolean);
 }
 
 function normalizeMeasurementKey(value: string): { key: string; multiplier?: number } | null {

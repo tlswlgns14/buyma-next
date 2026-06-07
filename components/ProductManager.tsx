@@ -21,7 +21,6 @@ import {
   getBuymaCategoryGender,
   getPairedBuymaCategoryId,
   isValidBuymaCategoryId,
-  resolveUnisexBuymaCategories,
 } from "@/lib/buyma/categories";
 import {
   clearStoredProducts,
@@ -49,6 +48,7 @@ import {
   normalizeStockStatus,
   sanitizeForCsv,
   splitListInput,
+  splitColorSizeSupplementFromDescription,
 } from "@/lib/buyma/text";
 
 type ToolTab = "edit" | "editor" | "settings";
@@ -78,11 +78,19 @@ type EditorDragTarget =
 type BuymaSizeOption = { id: string; name: string; label: string };
 type ProductDirtyFields = Partial<Record<keyof ProductDraft, true>>;
 
-const IMAGE_UPLOAD_CONCURRENCY = 3;
+const IMAGE_UPLOAD_CONCURRENCY = 5;
+const BUYMA_TITLE_MAX_LENGTH = 60;
+
+const BUYMA_CATEGORY_LABEL_OVERRIDES: Record<string, string> = {
+  "4116": "여성 패션/모자 > 해트",
+  "4117": "여성 패션/모자 > 캡",
+  "4207": "남성 패션/모자 > 해트",
+  "4208": "남성 패션/모자 > 캡",
+};
 
 const BUYMA_SEASON_OPTIONS = sortSeasonOptionsDescending(BUYMA_SEASONS);
 const BUYMA_CATEGORY_SEARCH_OPTIONS = BUYMA_CATEGORIES.map((category) => {
-  const label = getKoreanCategoryLabel(category.label);
+  const label = BUYMA_CATEGORY_LABEL_OVERRIDES[category.id] ?? getKoreanCategoryLabel(category.label);
   const display = formatCategoryDisplay(label);
   return {
     id: category.id,
@@ -320,14 +328,29 @@ export default function ProductManager() {
   }, [authUser?.id, settingsLoaded, settingsOwnerId]);
 
   async function scrapeUrls() {
-    const urls = getUrls(urlsInput);
+    const parsedUrls = getUrls(urlsInput);
+    const existingUrlKeys = new Set(
+      getCollectedCsvProducts(csvProducts)
+        .map((product) => normalizeUrlKey(product.sourceUrl))
+        .filter(Boolean),
+    );
+    const seenUrlKeys = new Set<string>();
+    const urls = parsedUrls.filter((url) => {
+      const key = normalizeUrlKey(url);
+      if (!key) return true;
+      if (existingUrlKeys.has(key) || seenUrlKeys.has(key)) return false;
+      seenUrlKeys.add(key);
+      return true;
+    });
+    const skippedUrlCount = parsedUrls.length - urls.length;
+
     if (urls.length === 0) {
-      setStatus("수집할 URL을 입력하세요.");
+      setStatus(skippedUrlCount > 0 ? "이미 CSV에 있는 URL이라 수집을 건너뛰었습니다." : "수집할 URL을 입력하세요.");
       return;
     }
 
     setIsScraping(true);
-    setStatus(`수집 시작: ${urls.length}개 URL`);
+    setStatus(`수집 시작: ${urls.length}개 URL${skippedUrlCount > 0 ? `, 중복 ${skippedUrlCount}개 건너뜀` : ""}`);
 
     const collected: ProductDraft[] = [];
     for (let index = 0; index < urls.length; index += 1) {
@@ -366,7 +389,6 @@ export default function ProductManager() {
     setManualProductFields({});
     setCurrentCsvRowIndexes([]);
     setCurrentProductsCollected(false);
-    setCsvEdits({ items: {}, colorSizes: {} });
     setActiveIndex(collected.length ? 0 : -1);
     setActiveTab("edit");
     setCsvPreviewOpen(true);
@@ -414,15 +436,43 @@ export default function ProductManager() {
         delete nextManualProductFields[index];
       }
 
-      const nextCsvProducts = mergeCurrentProductsIntoCsvProducts(csvProducts, normalizedProducts, currentCsvRowIndexes);
+      const shouldAppendUnisexVariant = shouldAppendCurrentProductsAsUnisexVariant(
+        products,
+        manualProductFields,
+        currentCsvRowIndexes,
+      );
+      const csvProductsToMerge = shouldAppendUnisexVariant
+        ? applyUnisexVariantSku(normalizedProducts, csvProducts)
+        : normalizedProducts;
+      if (shouldAppendUnisexVariant) {
+        csvProductsToMerge.forEach((product, index) => {
+          refreshedProducts[index] = product;
+        });
+      }
+      const removedCurrentCsvRowIndexes = shouldAppendUnisexVariant
+        ? []
+        : getRemovedCurrentCsvRowIndexes(currentCsvRowIndexes, csvProductsToMerge.length);
+      const nextCsvProducts = mergeCurrentProductsIntoCsvProducts(
+        csvProducts,
+        csvProductsToMerge,
+        currentCsvRowIndexes,
+        shouldAppendUnisexVariant,
+      );
       const nextCurrentCsvRowIndexes = getCurrentCsvRowIndexesAfterMerge(
         csvProducts.length,
-        normalizedProducts.length,
+        csvProductsToMerge.length,
         currentCsvRowIndexes,
+        shouldAppendUnisexVariant,
       );
 
       setProducts(refreshedProducts);
       setCsvProducts(nextCsvProducts);
+      if (removedCurrentCsvRowIndexes.length > 0) {
+        setCsvEdits((current) => ({
+          items: shiftCsvEditsAfterRowDeletes(current.items, removedCurrentCsvRowIndexes),
+          colorSizes: {},
+        }));
+      }
       setCurrentCsvRowIndexes(nextCurrentCsvRowIndexes);
       setCurrentProductsCollected(true);
       setManualProductFields(nextManualProductFields);
@@ -749,14 +799,19 @@ function BasicInfoPanel({
   const selectedImage = images[selectedImageIndex] ?? images[0] ?? "";
   const addImageInputRef = useRef<HTMLInputElement | null>(null);
   const [isImageManagerOpen, setIsImageManagerOpen] = useState(false);
-  const unisexCategories = resolveUnisexBuymaCategories(product ?? {});
-  const hasCategory = product?.unisex
-    ? Boolean(unisexCategories.menCategory && unisexCategories.womenCategory)
-    : isValidBuymaCategory(product?.category);
+  const hasCategory = isValidBuymaCategory(product?.category);
   const hasSeason = isValidBuymaSeason(product?.season);
+  const titleLength = countBuymaTitleCharacters(product?.title);
+  const titleOverLimit = Math.max(0, titleLength - BUYMA_TITLE_MAX_LENGTH);
 
   function updateImages(nextImages: string[]) {
-    onChange({ images: nextImages, uploadedImageUrls: undefined });
+    const nextImageSet = new Set(nextImages);
+    const removedImages = images.filter((image) => image && !image.startsWith("data:") && !nextImageSet.has(image));
+    onChange({
+      images: nextImages,
+      removedImageUrls: uniqueTextList([...(product?.removedImageUrls ?? []), ...removedImages]),
+      uploadedImageUrls: undefined,
+    });
     setSelectedImageIndex((current) => Math.max(0, Math.min(current, nextImages.length - 1)));
   }
 
@@ -812,7 +867,18 @@ function BasicInfoPanel({
             />
           </div>
         </div>
-        <input type="text" value={product?.title ?? ""} onChange={(event) => onChange({ title: event.target.value })} placeholder="English product name" />
+        <input
+          className={titleOverLimit ? "buyma-required-red" : ""}
+          type="text"
+          value={product?.title ?? ""}
+          onChange={(event) => onChange({ title: event.target.value })}
+          placeholder="English product name"
+        />
+        {titleOverLimit ? (
+          <div className="buyma-title-limit-warning">
+            상품명 60자 초과: {titleOverLimit}자 초과
+          </div>
+        ) : null}
 
         <div className="buyma-form-grid col3">
           <Field label="브랜드명">
@@ -874,7 +940,10 @@ function BasicInfoPanel({
 
         <div className="buyma-form-grid col3">
           <Field label="컨트롤(コントロール)">
-            <select value={product?.control ?? "下書き"} onChange={(event) => onChange({ control: event.target.value })}>
+            <select
+              value={product?.control ?? "下書き"}
+              onChange={(event) => onChange({ control: event.target.value, publicStatus: event.target.value })}
+            >
               <option value="下書き">초안(下書き)</option>
               <option value="公開">공개(公開)</option>
             </select>
@@ -919,20 +988,13 @@ function BasicInfoPanel({
               onChange={(event) => onChange({ sellingPrice: event.target.value === "" ? undefined : Number(event.target.value) || 0 })}
             />
           </Field>
-          {product?.unisex ? (
-            <>
-              <Field label="남성 카테고리">
-                <CategorySearchInput value={unisexCategories.menCategory} required={!unisexCategories.menCategory} onChange={(menCategory) => onChange({ menCategory, category: menCategory || product?.category })} />
-              </Field>
-              <Field label="여성 카테고리">
-                <CategorySearchInput value={unisexCategories.womenCategory} required={!unisexCategories.womenCategory} onChange={(womenCategory) => onChange({ womenCategory, category: womenCategory || product?.category })} />
-              </Field>
-            </>
-          ) : (
-            <Field label="카테고리">
-              <CategorySearchInput value={product?.category ?? ""} required={!hasCategory} onChange={(category) => onChange({ category })} />
-            </Field>
-          )}
+          <Field label={product?.unisex ? "카테고리 재선택" : "카테고리"}>
+            <CategorySearchInput
+              value={product?.category ?? ""}
+              required={!hasCategory}
+              onChange={(category) => onChange(buildCategorySelectionPatch(product, category))}
+            />
+          </Field>
           <label className="buyma-chk buyma-inline-bottom">
             <input
               type="checkbox"
@@ -956,13 +1018,24 @@ function BasicInfoPanel({
           </Field>
         </div>
 
-        <label>상세내용</label>
-        <textarea
-          rows={4}
-          value={product?.description ?? ""}
-          onChange={(event) => onChange({ description: event.target.value })}
-          placeholder="상품 상세 설명"
-        />
+        <div className="buyma-description-supplement-grid">
+          <Field label="상세내용">
+            <textarea
+              rows={4}
+              value={product?.description ?? ""}
+              onChange={(event) => onChange({ description: event.target.value })}
+              placeholder="상품 상세 설명"
+            />
+          </Field>
+          <Field label="色サイズ補足">
+            <textarea
+              rows={4}
+              value={product?.colorSizeSupplement ?? ""}
+              onChange={(event) => onChange({ colorSizeSupplement: event.target.value })}
+              placeholder="색상/사이즈 보충 내용을 입력"
+            />
+          </Field>
+        </div>
 
         <label>이미지 ({product?.images.length ?? 0})</label>
         <div className="buyma-image-thumbs">
@@ -2344,6 +2417,12 @@ function putEditedImageFirst(product: ProductDraft, editedImage: string) {
   return [editedImage, ...remainingImages];
 }
 
+function filterRemovedImages(images: string[], removedImageUrls: string[] | undefined, editedImage?: string) {
+  const removed = new Set((removedImageUrls ?? []).map((image) => cleanText(image)).filter(Boolean));
+  if (!removed.size) return images;
+  return images.filter((image) => image === editedImage || !removed.has(cleanText(image)));
+}
+
 function TabButton({
   active,
   onClick,
@@ -2535,10 +2614,11 @@ function resolveBuymaSizeTypeId(categoryId: unknown, size: unknown) {
   const normalizedSize = normalizeBuymaSizeName(size);
   if (!category || !normalizedSize) return "";
 
-  const matched = BUYMA_SIZES.find(
-    (entry) => entry.categoryId === category && normalizeBuymaSizeName(entry.name) === normalizedSize,
-  );
-  return matched?.id ?? "";
+  const categorySizes = BUYMA_SIZES.filter((entry) => entry.categoryId === category);
+  if (!categorySizes.length) return "0";
+
+  const matched = categorySizes.find((entry) => normalizeBuymaSizeName(entry.name) === normalizedSize);
+  return matched?.id ?? "0";
 }
 
 function normalizeBuymaSizeName(value: unknown) {
@@ -2701,17 +2781,15 @@ function formatCollectedTitleWithBrand(product: ProductDraft, title: string, pre
   if (!sourceTitle) return sourceTitle;
 
   const brand = resolveProductTitleBrand(product, sourceTitle);
-  const colors = resolveProductTitleColors(product);
   const cleanedTitle = removeProductTitleNoise(sourceTitle);
   const rawProductName =
-    stripTitlePrefix(stripTrailingColor(stripBrandFromTitle(cleanedTitle, brand), colors), titlePrefix) ||
+    stripTitlePrefix(stripTrailingColorCount(stripBrandFromTitle(cleanedTitle, brand)), titlePrefix) ||
     stripTitlePrefix(cleanedTitle, titlePrefix) ||
     "Fashion Item";
   const productName =
     product.site === "thenorthfacekorea.co.kr" ? appendProductCodeToTitle(rawProductName, product.productCode) : rawProductName;
-  const colorSuffix = colors.length > 1 ? `(${colors.length}colors)` : colors[0] ? `(${colors[0]})` : "";
 
-  return joinTitleParts(brand ? `【${brand}】` : "", titlePrefix, productName, colorSuffix);
+  return joinTitleParts(brand ? `[${brand}]` : "", titlePrefix, productName);
 }
 
 async function ensureJapaneseProductDescription(
@@ -2722,42 +2800,136 @@ async function ensureJapaneseProductDescription(
   const staticDescription = getJapaneseBrandDescription(product);
   const sourceDescription = normalizeDescriptionLines(product.descriptionKo);
 
+  if (shouldKeepRawColorSizeSupplement(product)) {
+    return ensureJapaneseProductDescriptionWithRawColorSizeSupplement(
+      product,
+      sourceDescription,
+      staticDescription,
+      descriptionPrefix,
+      placement,
+    );
+  }
+
   if (staticDescription) {
-    const extraSourceDescription = extractAdditionalDescriptionBlock(sourceDescription);
+    const extraSourceDescription =
+      extractAdditionalDescriptionBlock(sourceDescription) ||
+      splitColorSizeSupplementFromDescription(sourceDescription).colorSizeSupplement;
     if (!extraSourceDescription) {
-      return { ...product, description: applyDescriptionPrefix(staticDescription, descriptionPrefix, placement) };
+      return applyColorSizeSupplementFromDescription(
+        product,
+        staticDescription,
+        descriptionPrefix,
+        placement,
+      );
     }
 
     try {
       const translatedExtra = await translateMultilineText(extraSourceDescription, "ja");
-      return {
-        ...product,
-        description: applyDescriptionPrefix(
-          joinDescriptionBlocks(staticDescription, translatedExtra),
-          descriptionPrefix,
-          placement,
-        ),
-      };
+      return applyColorSizeSupplementFromDescription(
+        product,
+        joinDescriptionBlocks(staticDescription, translatedExtra),
+        descriptionPrefix,
+        placement,
+      );
     } catch {
-      return {
-        ...product,
-        description: applyDescriptionPrefix(
-          joinDescriptionBlocks(staticDescription, extraSourceDescription),
-          descriptionPrefix,
-          placement,
-        ),
-      };
+      return applyColorSizeSupplementFromDescription(
+        product,
+        joinDescriptionBlocks(staticDescription, extraSourceDescription),
+        descriptionPrefix,
+        placement,
+      );
     }
   }
 
-  if (!sourceDescription) return { ...product, description: applyDescriptionPrefix("", descriptionPrefix, placement) };
+  if (!sourceDescription) {
+    return applyColorSizeSupplementFromDescription(product, "", descriptionPrefix, placement);
+  }
 
   try {
     const translated = await translateMultilineText(sourceDescription, "ja");
-    return { ...product, description: applyDescriptionPrefix(translated, descriptionPrefix, placement) };
+    return applyColorSizeSupplementFromDescription(product, translated, descriptionPrefix, placement);
   } catch {
-    return { ...product, description: applyDescriptionPrefix(sourceDescription, descriptionPrefix, placement) };
+    return applyColorSizeSupplementFromDescription(product, sourceDescription, descriptionPrefix, placement);
   }
+}
+
+async function ensureJapaneseProductDescriptionWithRawColorSizeSupplement(
+  product: ProductDraft,
+  sourceDescription: string,
+  staticDescription: string,
+  descriptionPrefix = "",
+  placement: BuymaDescriptionPlacement = "before",
+): Promise<ProductDraft> {
+  const separatedSource = splitColorSizeSupplementFromDescription(sourceDescription);
+  const productWithRawSupplement = {
+    ...product,
+    colorSizeSupplement: mergeColorSizeSupplement(product.colorSizeSupplement, separatedSource.colorSizeSupplement),
+  };
+
+  if (staticDescription) {
+    if (!separatedSource.description) {
+      return applyColorSizeSupplementFromDescription(
+        productWithRawSupplement,
+        staticDescription,
+        descriptionPrefix,
+        placement,
+      );
+    }
+
+    try {
+      const translatedDescription = await translateMultilineText(separatedSource.description, "ja");
+      return applyColorSizeSupplementFromDescription(
+        productWithRawSupplement,
+        joinDescriptionBlocks(staticDescription, translatedDescription),
+        descriptionPrefix,
+        placement,
+      );
+    } catch {
+      return applyColorSizeSupplementFromDescription(
+        productWithRawSupplement,
+        joinDescriptionBlocks(staticDescription, separatedSource.description),
+        descriptionPrefix,
+        placement,
+      );
+    }
+  }
+
+  if (!separatedSource.description) {
+    return applyColorSizeSupplementFromDescription(productWithRawSupplement, "", descriptionPrefix, placement);
+  }
+
+  try {
+    const translated = await translateMultilineText(separatedSource.description, "ja");
+    return applyColorSizeSupplementFromDescription(productWithRawSupplement, translated, descriptionPrefix, placement);
+  } catch {
+    return applyColorSizeSupplementFromDescription(productWithRawSupplement, separatedSource.description, descriptionPrefix, placement);
+  }
+}
+
+function shouldKeepRawColorSizeSupplement(product: ProductDraft) {
+  return product.site === "not4nerd.net" || product.site === "999humanity.kr" || product.site === "youthisyours.net";
+}
+
+function applyColorSizeSupplementFromDescription(
+  product: ProductDraft,
+  description: string,
+  descriptionPrefix = "",
+  placement: BuymaDescriptionPlacement = "before",
+): ProductDraft {
+  const separated = splitColorSizeSupplementFromDescription(description);
+
+  return {
+    ...product,
+    description: applyDescriptionPrefix(separated.description, descriptionPrefix, placement),
+    colorSizeSupplement: mergeColorSizeSupplement(product.colorSizeSupplement, separated.colorSizeSupplement),
+  };
+}
+
+function mergeColorSizeSupplement(...values: Array<string | undefined>) {
+  const blocks = values
+    .map((value) => normalizeDescriptionLines(value))
+    .filter(Boolean);
+  return [...new Set(blocks)].join("\n\n");
 }
 
 function extractAdditionalDescriptionBlock(description: string) {
@@ -2786,7 +2958,24 @@ function mergeCurrentProductsIntoCsvProducts(
   csvProducts: Array<ProductDraft | null>,
   currentProducts: ProductDraft[],
   currentCsvRowIndexes: number[],
+  appendCurrentProducts = false,
 ) {
+  if (appendCurrentProducts) {
+    return [...csvProducts, ...currentProducts];
+  }
+
+  if (currentCsvRowIndexes.length > currentProducts.length) {
+    const replaceIndexes = currentCsvRowIndexes.slice(0, currentProducts.length);
+    const removeIndexes = new Set(currentCsvRowIndexes.slice(currentProducts.length));
+    const merged = [...csvProducts];
+
+    currentProducts.forEach((product, index) => {
+      merged[replaceIndexes[index]] = product;
+    });
+
+    return merged.filter((_, index) => !removeIndexes.has(index));
+  }
+
   if (currentCsvRowIndexes.length === currentProducts.length) {
     const merged = [...csvProducts];
     currentProducts.forEach((product, index) => {
@@ -2802,9 +2991,69 @@ function getCurrentCsvRowIndexesAfterMerge(
   csvProductCount: number,
   currentProductCount: number,
   currentCsvRowIndexes: number[],
+  appendCurrentProducts = false,
 ) {
+  if (appendCurrentProducts) {
+    return Array.from({ length: currentProductCount }, (_, index) => csvProductCount + index);
+  }
+
+  if (currentCsvRowIndexes.length > currentProductCount) {
+    return currentCsvRowIndexes.slice(0, currentProductCount);
+  }
+
   if (currentCsvRowIndexes.length === currentProductCount) return currentCsvRowIndexes;
   return Array.from({ length: currentProductCount }, (_, index) => csvProductCount + index);
+}
+
+function getRemovedCurrentCsvRowIndexes(currentCsvRowIndexes: number[], currentProductCount: number) {
+  return currentCsvRowIndexes.length > currentProductCount
+    ? currentCsvRowIndexes.slice(currentProductCount)
+    : [];
+}
+
+function shouldAppendCurrentProductsAsUnisexVariant(
+  products: ProductDraft[],
+  manualProductFields: Record<number, ProductDirtyFields>,
+  currentCsvRowIndexes: number[],
+) {
+  if (products.length !== 1 || currentCsvRowIndexes.length !== 1) return false;
+
+  const product = products[0];
+  const dirtyFields = manualProductFields[0] ?? {};
+  return Boolean(product?.unisex && dirtyFields.unisex);
+}
+
+function applyUnisexVariantSku(
+  products: ProductDraft[],
+  csvProducts: Array<ProductDraft | null>,
+) {
+  const existingSkus = new Set(
+    getCollectedCsvProducts(csvProducts).map((product) => cleanText(product.skuNumber)).filter(Boolean),
+  );
+
+  return products.map((product, index) => {
+    const skuNumber = makeUnisexVariantSku(product, index, existingSkus);
+    existingSkus.add(skuNumber);
+    return { ...product, skuNumber };
+  });
+}
+
+function makeUnisexVariantSku(
+  product: ProductDraft,
+  index: number,
+  existingSkus: Set<string>,
+) {
+  const categoryGender = getBuymaCategoryGender(product.category);
+  const suffix = categoryGender === "men" ? "M" : categoryGender === "women" ? "W" : "U";
+  const currentSku = cleanText(product.skuNumber) || makeSku(index, product.productCode);
+  const baseSku = currentSku.replace(/-(?:M|W|U)(?:-\d+)?$/i, "");
+  const candidate = `${baseSku}-${suffix}`;
+
+  if (!existingSkus.has(candidate)) return candidate;
+
+  let counter = 2;
+  while (existingSkus.has(`${candidate}-${counter}`)) counter += 1;
+  return `${candidate}-${counter}`;
 }
 
 function countCsvDataRows(csv: string) {
@@ -2825,7 +3074,7 @@ function applyCsvEdits(csv: string, edits: CsvCellEdits) {
   if (Object.keys(edits).length === 0) return csv;
 
   const rows = csvToRows(csv);
-  const descriptionColumnIndex = rows[0]?.indexOf("商品コメント") ?? -1;
+  const preserveNewlineColumns = getPreserveNewlineColumns(rows[0] ?? []);
   Object.entries(edits).forEach(([key, value]) => {
     const [rowIndex, cellIndex] = parseCsvEditKey(key);
     const targetRowIndex = rowIndex + 1;
@@ -2833,7 +3082,15 @@ function applyCsvEdits(csv: string, edits: CsvCellEdits) {
     rows[targetRowIndex][cellIndex] = value;
   });
 
-  return rowsToCsv(rows, descriptionColumnIndex >= 0 ? new Set([descriptionColumnIndex]) : undefined);
+  return rowsToCsv(rows, preserveNewlineColumns);
+}
+
+function getPreserveNewlineColumns(headers: string[]) {
+  return new Set(
+    ["商品コメント", "色サイズ補足"]
+      .map((header) => headers.indexOf(header))
+      .filter((index) => index >= 0),
+  );
 }
 
 function shiftCsvEditsAfterRowDeletes(edits: CsvCellEdits, deletedRowIndexes: number[]) {
@@ -2926,11 +3183,7 @@ function findProductMissingCategoryOrSeason(products: ProductDraft[]) {
     const category = cleanText(product.category);
     const season = cleanText(product.season);
 
-    if (product.unisex) {
-      const { menCategory, womenCategory } = resolveUnisexBuymaCategories(product);
-      if (!isValidBuymaCategory(menCategory)) fields.push("남성 카테고리");
-      if (!isValidBuymaCategory(womenCategory)) fields.push("여성 카테고리");
-    } else if (!isValidBuymaCategory(category)) {
+    if (!isValidBuymaCategory(category)) {
       fields.push("카테고리");
     }
     if (!isValidBuymaSeason(season)) fields.push("시즌");
@@ -2947,20 +3200,30 @@ function isValidBuymaCategory(category: unknown) {
 function buildUnisexCategoryPatch(product: ProductDraft | null): Partial<ProductDraft> {
   if (!product) return { unisex: true };
 
-  const resolved = resolveUnisexBuymaCategories(product);
   const category = cleanText(product.category);
   const categoryGender = getBuymaCategoryGender(category);
-  const menCategory = resolved.menCategory || (
-    categoryGender === "women" ? getPairedBuymaCategoryId(category, "men") : ""
-  );
-  const womenCategory = resolved.womenCategory || (
-    categoryGender === "men" ? getPairedBuymaCategoryId(category, "women") : ""
-  );
 
   return {
     unisex: true,
-    menCategory,
-    womenCategory,
+    category: "",
+    ...(categoryGender === "men" ? {
+      menCategory: category,
+      womenCategory: product.womenCategory || getPairedBuymaCategoryId(category, "women"),
+    } : {}),
+    ...(categoryGender === "women" ? {
+      womenCategory: category,
+      menCategory: product.menCategory || getPairedBuymaCategoryId(category, "men"),
+    } : {}),
+  };
+}
+
+function buildCategorySelectionPatch(product: ProductDraft | null, category: string): Partial<ProductDraft> {
+  const categoryGender = getBuymaCategoryGender(category);
+
+  return {
+    category,
+    ...(product?.unisex && categoryGender === "men" ? { menCategory: category } : {}),
+    ...(product?.unisex && categoryGender === "women" ? { womenCategory: category } : {}),
   };
 }
 
@@ -2970,11 +3233,20 @@ function isValidBuymaSeason(season: unknown) {
 }
 
 const BUYMA_LISTING_FIELD_KEYS: Array<keyof ProductDraft> = [
+  "title",
+  "titleKo",
+  "titleEn",
+  "translatedTitle",
+  "titleManuallyEdited",
   "buymaProductId",
   "skuNumber",
+  "price",
+  "sellingPrice",
   "referencePrice",
   "control",
   "publicStatus",
+  "category",
+  "season",
   "theme",
   "unisex",
   "menCategory",
@@ -3035,7 +3307,9 @@ const BUYMA_LISTING_FIELD_KEYS: Array<keyof ProductDraft> = [
   "shippingCity",
   "taxIncluded",
   "listingMemo",
+  "colorSizeSupplement",
   "editedImage",
+  "removedImageUrls",
   "uploadedImageUrls",
 ];
 
@@ -3117,6 +3391,20 @@ function mergeRefetchedProduct(
       "";
   }
 
+  if (!dirtyFields.description || !dirtyFields.colorSizeSupplement) {
+    const separated = splitColorSizeSupplementFromDescription(merged.description);
+    if (!dirtyFields.description) merged.description = separated.description;
+    if (!dirtyFields.colorSizeSupplement) {
+      merged.colorSizeSupplement = mergeColorSizeSupplement(merged.colorSizeSupplement, separated.colorSizeSupplement);
+    }
+  }
+
+  if (merged.editedImage) {
+    merged.images = putEditedImageFirst(merged, merged.editedImage);
+  }
+
+  merged.images = filterRemovedImages(merged.images, merged.removedImageUrls, merged.editedImage);
+
   return merged;
 }
 
@@ -3141,9 +3429,12 @@ function normalizeProduct(product: ProductDraft, settings: BuymaSettings, index:
   const sellingPrice = product.sellingPrice || calculateSellingPrice(product.price, settings.marginRate, settings.exchangeRate);
   const colors = resolveProductTitleColors(brandedProduct);
   const productTitle = product.titleManuallyEdited
-    ? normalizeTitlePart(product.title) || buildCollectedProductTitle(brandedProduct, colors, settings.productTitlePrefix)
-    : buildCollectedProductTitle(brandedProduct, colors, settings.productTitlePrefix);
+    ? normalizeTitlePart(product.title) || buildCollectedProductTitle(brandedProduct, settings.productTitlePrefix)
+    : buildCollectedProductTitle(brandedProduct, settings.productTitlePrefix);
   const sizeTableData = buildColorSizeRows({ ...brandedProduct, colors });
+  const separatedDescription = splitColorSizeSupplementFromDescription(
+    brandedProduct.description || getJapaneseBrandDescription(brandedProduct) || "",
+  );
 
   return {
     ...brandedProduct,
@@ -3159,8 +3450,12 @@ function normalizeProduct(product: ProductDraft, settings: BuymaSettings, index:
     colorSystemMap: Object.fromEntries(
       sizeTableData.map((row) => [row.color, row.colorSystemId || getColorSystemId(row.color)]),
     ),
+    colorSizeSupplement: mergeColorSizeSupplement(
+      brandedProduct.colorSizeSupplement,
+      separatedDescription.colorSizeSupplement,
+    ),
     description: applyDescriptionPrefix(
-      brandedProduct.description || getJapaneseBrandDescription(brandedProduct) || "",
+      separatedDescription.description,
       settings.productDescriptionPrefix,
       settings.productDescriptionPlacement,
     ),
@@ -3218,21 +3513,20 @@ function applyBuymaBrand(product: ProductDraft): ProductDraft {
   };
 }
 
-function buildCollectedProductTitle(product: ProductDraft, colors: string[], prefix: string) {
+function buildCollectedProductTitle(product: ProductDraft, prefix: string) {
   const titlePrefix = normalizeTitlePart(prefix);
   const sourceTitle = normalizeTitlePart(product.translatedTitle || product.titleEn || product.title || product.titleKo);
   const brand = resolveProductTitleBrand(product, sourceTitle);
-  const bracketedBrand = brand ? `【${brand}】` : "";
+  const bracketedBrand = brand ? `[${brand}]` : "";
   const cleanedTitle = removeProductTitleNoise(sourceTitle);
   const rawProductName =
-    stripTitlePrefix(stripTrailingColor(stripBrandFromTitle(cleanedTitle, brand), colors), titlePrefix) ||
+    stripTitlePrefix(stripTrailingColorCount(stripBrandFromTitle(cleanedTitle, brand)), titlePrefix) ||
     stripTitlePrefix(cleanedTitle, titlePrefix) ||
     "Fashion Item";
   const productName =
     product.site === "thenorthfacekorea.co.kr" ? appendProductCodeToTitle(rawProductName, product.productCode) : rawProductName;
-  const colorSuffix = colors.length > 1 ? `(${colors.length}colors)` : colors[0] ? `(${colors[0]})` : "";
 
-  return joinTitleParts(bracketedBrand, titlePrefix, productName, colorSuffix);
+  return joinTitleParts(bracketedBrand, titlePrefix, productName);
 }
 
 function appendProductCodeToTitle(title: string, productCode: unknown) {
@@ -3266,13 +3560,13 @@ function isNoiseColorOption(value: string) {
 function stripBrandFromTitle(title: string, brand: string) {
   if (!title) return title;
   if (!brand) {
-    return title.replace(new RegExp(`^[\\[【][^\\]】]+[\\]】]\\s*`), "").trim();
+    return title.replace(new RegExp(`^[\\[【(][^\\]】)]+[\\]】)]\\s*`), "").trim();
   }
   const escapedBrand = escapeRegExp(brand);
 
   return title
-    .replace(new RegExp(`^[\\[【]?${escapedBrand}[\\]】]?\\s*[-_:|]*\\s*`, "i"), "")
-    .replace(new RegExp(`^[\\[【][^\\]】]+[\\]】]\\s*`), "")
+    .replace(new RegExp(`^[\\[【(]?${escapedBrand}[\\]】)]?\\s*[-_:|]*\\s*`, "i"), "")
+    .replace(new RegExp(`^[\\[【(][^\\]】)]+[\\]】)]\\s*`), "")
     .trim();
 }
 
@@ -3287,17 +3581,8 @@ function removeProductTitleNoise(title: string) {
     .trim();
 }
 
-function stripTrailingColor(title: string, colors: string[]) {
-  let result = title.replace(/\s*\(\d+colors\)\s*$/i, "").trim();
-  colors.forEach((color) => {
-    if (!color) return;
-    const escapedColor = escapeRegExp(color);
-    result = result
-      .replace(new RegExp(`\\s*\\(${escapedColor}\\)\\s*$`, "i"), "")
-      .replace(new RegExp(`\\s+${escapedColor}\\s*$`, "i"), "")
-      .trim();
-  });
-  return result;
+function stripTrailingColorCount(title: string) {
+  return title.replace(/\s*\(\d+\s*colors?\)\s*$/i, "").trim();
 }
 
 function stripTitlePrefix(title: string, prefix: string) {
@@ -3316,7 +3601,7 @@ function extractColorFromTitle(title: string) {
 }
 
 function extractBracketBrand(title: string) {
-  return title.match(/[【\[]([^】\]]+)[】\]]/)?.[1] ?? "";
+  return title.match(/[【\[(]([^】\])]+)[】\])]/)?.[1] ?? "";
 }
 
 function uniqueTextList(values: string[]) {
@@ -3333,7 +3618,7 @@ function joinTitleParts(...parts: Array<string | undefined>) {
 function normalizeTitlePart(value: unknown) {
   return cleanText(value)
     .replace(/[_/|]+/g, " ")
-    .replace(/\s*[-:]\s*/g, " ")
+    .replace(/\s*:\s*/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -3493,6 +3778,31 @@ function makeFailedProduct(sourceUrl: string, error: string): ProductDraft {
 
 function getUrls(value: string) {
   return value.split(/\r?\n/).map((url) => url.trim()).filter(Boolean);
+}
+
+function countBuymaTitleCharacters(value: unknown) {
+  return [...cleanText(value)].length;
+}
+
+function normalizeUrlKey(value: unknown) {
+  const text = cleanText(value);
+  if (!text) return "";
+
+  try {
+    const url = new URL(text);
+    url.hash = "";
+    const sortedParams = [...url.searchParams.entries()]
+      .sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+        `${leftKey}=${leftValue}`.localeCompare(`${rightKey}=${rightValue}`),
+      );
+    url.search = "";
+    sortedParams.forEach(([key, paramValue]) => {
+      url.searchParams.append(key, paramValue);
+    });
+    return url.toString();
+  } catch {
+    return text;
+  }
 }
 
 function triggerDownload(blob: Blob, filename: string) {

@@ -115,6 +115,61 @@ export function cleanText(value: unknown) {
     .trim();
 }
 
+export function normalizeMultilineText(value: unknown) {
+  return String(value ?? "")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => cleanText(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function splitColorSizeSupplementFromDescription(value: unknown) {
+  const description = normalizeMultilineText(value);
+  if (!description) return { description: "", colorSizeSupplement: "" };
+
+  const blocks = description.split(/\n{2,}/);
+  const detailBlocks: string[] = [];
+  const supplementBlocks: string[] = [];
+
+  blocks.forEach((block) => {
+    if (isColorSizeSupplementBlock(block)) supplementBlocks.push(block.trim());
+    else detailBlocks.push(block.trim());
+  });
+
+  if (supplementBlocks.length) {
+    return {
+      description: detailBlocks.filter(Boolean).join("\n\n"),
+      colorSizeSupplement: supplementBlocks.filter(Boolean).join("\n\n"),
+    };
+  }
+
+  const lines = description.split("\n");
+  const markerIndex = lines.findIndex((line) => COLOR_SIZE_SUPPLEMENT_MARKER_PATTERN.test(line));
+  if (markerIndex < 0) return { description, colorSizeSupplement: "" };
+
+  return {
+    description: lines.slice(0, markerIndex).join("\n").trim(),
+    colorSizeSupplement: lines.slice(markerIndex).join("\n").trim(),
+  };
+}
+
+function isColorSizeSupplementBlock(block: string) {
+  const lines = normalizeMultilineText(block).split("\n").filter(Boolean);
+  if (!lines.length) return false;
+  if (lines.some((line) => COLOR_SIZE_SUPPLEMENT_MARKER_PATTERN.test(line))) return true;
+
+  const measurementLines = lines.filter((line) => COLOR_SIZE_MEASUREMENT_LINE_PATTERN.test(line));
+  return measurementLines.length >= Math.max(2, Math.ceil(lines.length * 0.6));
+}
+
+const COLOR_SIZE_SUPPLEMENT_MARKER_PATTERN =
+  /(?:サイズ\s*(?:ガイド|詳細|表)|サイズガイド|サイズ詳細|size\s*(?:guide|chart|detail|details)|사이즈\s*(?:상세|가이드|표)|실측\s*사이즈|치수\s*(?:항목|정보)?)/i;
+
+const COLOR_SIZE_MEASUREMENT_LINE_PATTERN =
+  /(?:\b(?:free|one\s*size|os|xs|s|m|l|xl|xxl|length|shoulder|chest|bust|sleeve|waist|hip|hips|rise|inseam|thigh|hem|width|height|head|brim)\b|(?:フリーサイズ|頭長|肩幅|胸囲|着丈|袖丈|身幅|ウエスト|ヒップ|幅|高さ|총장|어깨|가슴|소매|허리|힙|밑위|허벅지|밑단|세로|가로|높이|머리|챙))/i;
+
 export function parsePrice(value: unknown) {
   const numeric = String(value ?? "").replace(/[^\d.]/g, "");
   return Number.parseFloat(numeric) || 0;

@@ -111,6 +111,15 @@ const sourcingSites = [
       "https://999humanity.kr/product/{상품명}/{상품번호}/",
     ],
   },
+  {
+    name: "NOT4NERD",
+    domain: "not4nerd.net",
+    status: "지원중",
+    urls: [
+      "https://www.not4nerd.net/product/detail.html?product_no={상품번호}",
+      "https://www.not4nerd.net/product/{상품명}/{상품번호}/",
+    ],
+  },
 ];
 
 export default function Dashboard() {

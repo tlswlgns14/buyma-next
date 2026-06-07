@@ -1,6 +1,7 @@
 import { adererrorExtractor } from "./adererror";
 import { humanity999Extractor } from "./humanity999";
 import { musinsaExtractor } from "./musinsa";
+import { not4nerdExtractor } from "./not4nerd";
 import { sansangearExtractor } from "./sansangear";
 import { saturExtractor } from "./satur";
 import { thenorthfaceExtractor } from "./thenorthface";
@@ -15,6 +16,7 @@ const PRODUCT_EXTRACTORS: ProductExtractor[] = [
   saturExtractor,
   thenorthfaceExtractor,
   humanity999Extractor,
+  not4nerdExtractor,
 ];
 
 export function parseProductUrl(value: string) {

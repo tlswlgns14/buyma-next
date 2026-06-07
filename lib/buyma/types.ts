@@ -1,4 +1,4 @@
-export type ProductSite = "musinsa.com" | "youthisyours.net" | "sansangear.com" | "adererror.com" | "satur.co.kr" | "thenorthfacekorea.co.kr" | "999humanity.kr" | "ssfshop.com" | "29cm.co.kr" | "unknown";
+export type ProductSite = "musinsa.com" | "youthisyours.net" | "sansangear.com" | "adererror.com" | "satur.co.kr" | "thenorthfacekorea.co.kr" | "999humanity.kr" | "not4nerd.net" | "ssfshop.com" | "29cm.co.kr" | "unknown";
 
 export type ProductDraft = {
   site: ProductSite;
@@ -30,6 +30,7 @@ export type ProductDraft = {
   colorSystemId?: string;
   colorSystemMap?: Record<string, string>;
   images: string[];
+  removedImageUrls?: string[];
   brandLogo?: string;
   brandLogos?: string[];
   editedImage?: string;
@@ -117,6 +118,7 @@ export type ProductDraft = {
   listingMemo?: string;
   descriptionKo?: string;
   description?: string;
+  colorSizeSupplement?: string;
   stockStatus?: StockStatus | "normal" | "soldout";
   extractedAt: string;
 };
