@@ -33,7 +33,8 @@ export const not4nerdExtractor: ProductExtractor = {
 
 async function extractNot4nerdProduct(url: URL): Promise<ProductDraft> {
   const main = await extractProductPage(url);
-  const variantUrls = main.variantUrls
+  const categoryVariantUrls = await extractCategoryVariantUrls(url, main.title);
+  const variantUrls = unique([...main.variantUrls, ...categoryVariantUrls])
     .filter((variantUrl) => normalizeUrl(variantUrl) !== normalizeUrl(url.toString()))
     .slice(0, 12);
   const variants = (
@@ -438,6 +439,23 @@ function extractVariantUrls(html: string, baseUrl: URL, title: string) {
       .map((item) => resolveUrl(item.href, baseUrl))
       .filter((variantUrl) => normalizeUrl(variantUrl) !== normalizeUrl(baseUrl.toString())),
   );
+}
+
+async function extractCategoryVariantUrls(productUrl: URL, title: string) {
+  const categoryNo = extractCategoryNo(productUrl);
+  if (!categoryNo) return [];
+
+  try {
+    const categoryUrl = new URL(`/product/list.html?cate_no=${encodeURIComponent(categoryNo)}`, productUrl);
+    const html = await fetchHtml(categoryUrl.toString());
+    return extractVariantUrls(html, categoryUrl, title);
+  } catch {
+    return [];
+  }
+}
+
+function extractCategoryNo(url: URL) {
+  return cleanText(url.searchParams.get("cate_no")) || cleanText(url.pathname.match(/\/category\/(\d+)(?:\/|$)/)?.[1]);
 }
 
 function extractProductImages(html: string, jsonLd: JsonLdProduct | null, baseUrl: URL) {

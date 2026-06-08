@@ -35,10 +35,8 @@ async function extractSansangearProduct(url: URL): Promise<ProductDraft> {
   const stockStatus = resolveOverallStockStatus(optionStockMap);
   const images = extractProductImages(html, jsonLd, url);
   const brandLogo = extractBrandLogo(html, url);
-  const descriptionKo = joinDescriptionBlocks(
-    normalizeTextBlock(extractTabContent(html, "DETAILS")),
-    buildSizeGuideDescription(sizeGuideHtml),
-  );
+  const descriptionKo = normalizeTextBlock(extractTabContent(html, "DETAILS"));
+  const colorSizeSupplement = buildEnglishSizeGuideDescription(sizeGuideHtml);
 
   if (!title && images.length === 0) {
     throw new Error("Sansan Gear product information could not be found. Please check the URL.");
@@ -61,6 +59,7 @@ async function extractSansangearProduct(url: URL): Promise<ProductDraft> {
     productCode: productNo,
     descriptionKo,
     description: "",
+    colorSizeSupplement,
     stockStatus,
     optionStockMap,
     ...(Object.keys(sizeMeasurements).length ? { sizeMeasurements } : {}),
@@ -259,7 +258,7 @@ function parseSizeGuideMeasurements(sizeGuideHtml: string) {
   return measurements;
 }
 
-function buildSizeGuideDescription(sizeGuideHtml: string) {
+function buildEnglishSizeGuideDescription(sizeGuideHtml: string) {
   const rows = parseHtmlTableRows(sizeGuideHtml);
   if (rows.length < 2) return "";
 
@@ -273,11 +272,18 @@ function buildSizeGuideDescription(sizeGuideHtml: string) {
     headers.slice(1).forEach((header, headerIndex) => {
       const value = cleanText(cells[headerIndex + 1]);
       if (!header || !value) return;
-      lines.push(`${header} ${formatSizeGuideDescriptionValue(value)}`);
+      const label = getEnglishSizeGuideLabel(header);
+      if (label) lines.push(`${label} ${formatSizeGuideDescriptionValue(value)}`);
     });
   });
 
   return lines.length > 1 ? lines.join("\n") : "";
+}
+
+function getEnglishSizeGuideLabel(value: string) {
+  const label = cleanText(value);
+  if (!label || /[가-힣ぁ-んァ-ン一-龥]/.test(label)) return "";
+  return label;
 }
 
 function formatSizeGuideDescriptionValue(value: string) {
@@ -440,13 +446,6 @@ function normalizeTextBlock(value: string) {
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-}
-
-function joinDescriptionBlocks(...blocks: string[]) {
-  return blocks
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .join("\n\n");
 }
 
 function cleanPageTitle(value = "") {

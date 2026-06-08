@@ -406,13 +406,12 @@ function normalizeBuymaTitle(product: ProductDraft, prefix = "") {
   const bracketedBrand = brand ? `[${brand}]` : "";
   const strippedTitle = stripBrandFromTitle(source, brand);
   const rawProductName =
-    stripTitlePrefix(stripTrailingColorCount(strippedTitle), titlePrefix) ||
     stripTitlePrefix(strippedTitle, titlePrefix) ||
     "Fashion Item";
   const productName =
     product.site === "thenorthfacekorea.co.kr" ? appendProductCodeToTitle(rawProductName, product.productCode) : rawProductName;
 
-  return joinTitleParts(bracketedBrand, titlePrefix, productName);
+  return joinTitleParts(bracketedBrand, titlePrefix, appendColorCountToTitle(productName, product));
 }
 
 function appendProductCodeToTitle(title: string, productCode: unknown) {
@@ -454,8 +453,26 @@ function stripBrandFromTitle(title: string, brand: string) {
     .trim();
 }
 
-function stripTrailingColorCount(title: string) {
-  return title.replace(/\s*\(\d+\s*colors?\)\s*$/i, "").trim();
+function appendColorCountToTitle(title: string, product: ProductDraft) {
+  const colorCount = getProductTitleColorCount(product);
+  if (colorCount <= 1 || /\(\d+\s*colors?\)\s*$/i.test(title)) return title;
+  return `${title} (${colorCount}colors)`;
+}
+
+function getProductTitleColorCount(product: ProductDraft) {
+  const colorCandidates = [
+    ...(product.colors ?? []),
+    ...(product.sizeTableData?.map((row) => row.color) ?? []),
+  ].flatMap((color) => splitListInput(color));
+  const usefulColors = uniqueTextList(colorCandidates.map(convertColorToEnglish)).filter(
+    (color) => color && color !== "FREE" && color !== "ONE SIZE" && !isNoiseColorOption(color),
+  );
+
+  return usefulColors.length;
+}
+
+function isNoiseColorOption(value: string) {
+  return /^(W|M|F|WOMEN|WOMAN|MEN|MAN|여성|남성|공용|UNISEX)$/i.test(cleanText(value));
 }
 
 function stripTitlePrefix(title: string, prefix: string) {
@@ -466,6 +483,10 @@ function stripTitlePrefix(title: string, prefix: string) {
 
 function extractBracketBrand(title: string) {
   return title.match(/[【\[(]([^】\])]+)[】\])]/)?.[1] ?? "";
+}
+
+function uniqueTextList(values: string[]) {
+  return [...new Set(values.map((value) => cleanText(value)).filter(Boolean))];
 }
 
 function joinTitleParts(...parts: Array<string | undefined>) {

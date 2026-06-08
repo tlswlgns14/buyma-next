@@ -280,6 +280,7 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
       )
     : null;
   const manualReviewUrl = manualReviewProduct ? getBuymaReviewUrl(manualReviewProduct) : "";
+  const manualReviewSearchKeyword = manualReviewProduct ? getBuymaReviewKeyword(manualReviewProduct) : "";
   const manualReviewBatchLabel = manualReviewBatchName
     ? `${manualReviewBatchCreatedAt ? `${formatDateTime(manualReviewBatchCreatedAt)} ` : ""}${getManualReviewBatchFilename(manualReviewBatchName)}`
     : "";
@@ -1365,7 +1366,7 @@ export default function CompetitorPriceChecker({ mode = "checker" }: CompetitorP
                 <label className="grid grid-rows-[16px_40px_16px] gap-1 text-xs font-extrabold text-[#6c655b]">
                   <span className="leading-4">검색기준</span>
                   <div className="min-h-10 rounded-lg border border-black/10 bg-white px-3 py-2 text-sm font-bold text-[#151515]">
-                    {manualReviewProduct.searchKeyword || manualReviewProduct.title || "-"}
+                    {manualReviewSearchKeyword || "-"}
                   </div>
                   <span className="min-h-4" aria-hidden="true" />
                 </label>
@@ -2532,13 +2533,29 @@ function getProductLabel(product: TrackedBuymaProduct) {
 }
 
 function getBuymaReviewUrl(product: TrackedBuymaProduct) {
+  const legacyAutoSearchUrl = getLegacyAutoSearchUrl(product);
+  const reviewKeyword = getBuymaReviewKeyword(product);
+
   return (
-    product.lastSearchUrl ||
-    product.searchUrl ||
-    (product.searchKeyword ? buildBuymaSearchUrl(product.searchKeyword) : "") ||
-    (product.title ? buildBuymaSearchUrl(product.title) : "") ||
+    (product.lastSearchUrl && product.lastSearchUrl !== legacyAutoSearchUrl ? product.lastSearchUrl : "") ||
+    (product.searchUrl && product.searchUrl !== legacyAutoSearchUrl ? product.searchUrl : "") ||
+    (reviewKeyword ? buildBuymaSearchUrl(reviewKeyword) : "") ||
     product.buymaUrl
   );
+}
+
+function getBuymaReviewKeyword(product: TrackedBuymaProduct) {
+  const legacyAutoKeyword = buildDefaultKeyword(product.brand, product.modelNumber, product.title);
+  if (product.modelNumber && product.searchKeyword === legacyAutoKeyword) {
+    return buildDefaultKeyword(product.brand, "", product.title);
+  }
+
+  return product.searchKeyword || buildDefaultKeyword(product.brand, "", product.title) || product.title;
+}
+
+function getLegacyAutoSearchUrl(product: TrackedBuymaProduct) {
+  const legacyAutoKeyword = buildDefaultKeyword(product.brand, product.modelNumber, product.title);
+  return legacyAutoKeyword ? buildBuymaSearchUrl(legacyAutoKeyword) : "";
 }
 
 function getEmptyMessage(filterMode: ProductFilterMode) {
@@ -2913,7 +2930,6 @@ function normalizeHeader(value: string) {
   if (trimmed === "ブランド") return "brand";
   if (trimmed === "モデル") return "model";
   if (trimmed === "単価") return "ownPrice";
-  if (trimmed === "商品管理番号") return "modelNumber";
 
   const normalized = value.trim().toLowerCase().replace(/[\s_()[\]{}]/g, "");
 
@@ -2924,7 +2940,6 @@ function normalizeHeader(value: string) {
   if (normalized === "モデル") return "model";
   if (normalized === "単価") return "ownPrice";
   if (normalized === "ブランド品番1") return "brandProductNumber";
-  if (normalized === "商品管理番号") return "modelNumber";
 
   if (["buymaproductid", "productid", "itemid", "상품번호", "상품id", "아이템id"].includes(normalized)) return "buymaProductId";
   if (["buymaurl", "url", "itemurl", "상품url", "아이템url"].includes(normalized)) return "buymaUrl";

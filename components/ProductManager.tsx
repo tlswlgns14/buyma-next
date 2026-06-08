@@ -55,6 +55,12 @@ type ToolTab = "edit" | "editor" | "settings";
 type EditorTemplate = "basic" | "lucky" | "lucky2" | "northface" | "northfaceWhiteLabel";
 type CsvTableKey = "items" | "colorSizes";
 type CsvCellEdits = Record<string, string>;
+const EDITOR_DESIGN_SIZE = 800;
+const EDITOR_CANVAS_SIZE = 1300;
+const EDITOR_CANVAS_SCALE = EDITOR_CANVAS_SIZE / EDITOR_DESIGN_SIZE;
+const EDITOR_INITIAL_IMAGE_MAX_SIZE = 640;
+const EDITOR_LUCKY_HEADER_HEIGHT = 112;
+const EDITOR_LUCKY_LEFT_WIDTH = 330;
 type EditorPlacedImage = {
   id: string;
   src: string;
@@ -63,6 +69,7 @@ type EditorPlacedImage = {
   width: number;
   height: number;
   removeBackground: boolean;
+  clipToLuckyRightCell?: boolean;
 };
 type EditorDragTarget =
   | { type: "logo"; offsetX: number; offsetY: number }
@@ -77,6 +84,11 @@ type EditorDragTarget =
     };
 type BuymaSizeOption = { id: string; name: string; label: string };
 type ProductDirtyFields = Partial<Record<keyof ProductDraft, true>>;
+type SizeSupplementMismatch = {
+  missingInSupplement: string[];
+  missingInDetail: string[];
+  missingInDetailByColor: Array<{ color: string; sizes: string[] }>;
+};
 
 const IMAGE_UPLOAD_CONCURRENCY = 5;
 const BUYMA_TITLE_MAX_LENGTH = 60;
@@ -374,7 +386,11 @@ export default function ProductManager() {
             settings.productDescriptionPrefix,
             settings.productDescriptionPlacement,
           );
-          collected.push({ ...describedProduct, skuNumber: describedProduct.skuNumber || skuNumber });
+          collected.push({
+            ...describedProduct,
+            sellingPrice: describedProduct.sellingPrice ?? 0,
+            skuNumber: describedProduct.skuNumber || skuNumber,
+          });
         } else {
           collected.push({ ...makeFailedProduct(url, result.error), skuNumber });
         }
@@ -402,9 +418,9 @@ export default function ProductManager() {
       return;
     }
 
-    const missingRequiredProduct = findProductMissingCategoryOrSeason(products);
+    const missingRequiredProduct = await findProductCollectionValidationIssue(products);
     if (missingRequiredProduct) {
-      const message = `${missingRequiredProduct.index + 1}번 상품의 ${missingRequiredProduct.fields.join(", ")}을(를) 선택하지않았습니다.`;
+      const message = `${missingRequiredProduct.index + 1}번 상품의 ${missingRequiredProduct.fields.join(", ")}을(를) 확인해주세요.`;
       setActiveIndex(missingRequiredProduct.index);
       setCollectionAlert(message);
       setStatus(message);
@@ -604,10 +620,19 @@ export default function ProductManager() {
         ...product,
         skuNumber: product.skuNumber || makeSku(index, product.productCode),
       }));
+      const hasEditedImage = exportProducts.some(hasProductEditedImage);
+
+      if (hasEditedImage && !settings.enableImageUpload) {
+        throw new Error("편집 메인이미지는 BUYMA CSV에 URL로 등록해야 합니다. 설정에서 이미지 업로드 사용을 켜고 다시 다운로드하세요.");
+      }
 
       if (settings.enableImageUpload) {
         exportProducts = await uploadAllProductImages(exportProducts, settings, setStatus);
         setCsvProducts(exportProducts);
+      }
+      const missingEditedImageUploadIndex = findMissingEditedImageUploadIndex(exportProducts);
+      if (missingEditedImageUploadIndex >= 0) {
+        throw new Error(`${missingEditedImageUploadIndex + 1}번 상품의 편집 메인이미지 업로드에 실패했습니다. 이미지 업로드 설정을 확인한 뒤 다시 다운로드하세요.`);
       }
 
       const bundle = applyCsvEditsToBundle(generateBuymaCsvBundle(exportProducts, settings), csvEdits);
@@ -791,18 +816,76 @@ function BasicInfoPanel({
   onClear: () => void;
   onDownload: () => void;
 }) {
-  const calculatedPrice = product
-    ? calculateSellingPrice(product.price, settings.marginRate, settings.exchangeRate)
-    : 0;
-  const images = product?.images ?? [];
+  const images = useMemo(() => product?.images ?? [], [product?.images]);
+  const imageKey = useMemo(() => images.join("\n"), [images]);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const selectedImage = images[selectedImageIndex] ?? images[0] ?? "";
   const addImageInputRef = useRef<HTMLInputElement | null>(null);
   const [isImageManagerOpen, setIsImageManagerOpen] = useState(false);
+  const [brokenImages, setBrokenImages] = useState<Set<string>>(new Set());
   const hasCategory = isValidBuymaCategory(product?.category);
   const hasSeason = isValidBuymaSeason(product?.season);
+  const hasSellingPrice = !product || isValidSellingPrice(product.sellingPrice);
+  const hasBrandName = !product || isRequiredText(product.brand);
+  const hasBrandId = !product || isValidBuymaBrandId(product.brandId);
+  const hasModelNumber = !product || isRequiredText(getModelNumberInputValue(product));
   const titleLength = countBuymaTitleCharacters(product?.title);
   const titleOverLimit = Math.max(0, titleLength - BUYMA_TITLE_MAX_LENGTH);
+  const hasTitle = !product || isRequiredText(product.title);
+  const titleInvalid = !hasTitle || titleOverLimit > 0;
+  const hasBrokenImages = brokenImages.size > 0;
+  const sizeSupplementMismatch = getSizeSupplementMismatch(product);
+  const hasSizeSupplementMismatch = hasSizeSupplementMismatchIssue(sizeSupplementMismatch);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!images.length) {
+      void Promise.resolve().then(() => {
+        if (!cancelled) setBrokenImages((current) => current.size ? new Set() : current);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void Promise.all(images.map((src) => checkImageLoadable(src).then((isLoadable) => ({ src, isLoadable })))).then((results) => {
+      if (cancelled) return;
+      setBrokenImages(new Set(results.filter((result) => !result.isLoadable).map((result) => result.src)));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [imageKey, images]);
+
+  function markPreviewImageBroken(src: string) {
+    if (!src) return;
+    setBrokenImages((current) => {
+      if (current.has(src)) return current;
+      const next = new Set(current);
+      next.add(src);
+      return next;
+    });
+  }
+
+  function markPreviewImageLoaded(src: string) {
+    if (!src) return;
+    setBrokenImages((current) => {
+      if (!current.has(src)) return current;
+      const next = new Set(current);
+      next.delete(src);
+      return next;
+    });
+  }
+
+  function handlePreviewImageError(src: string) {
+    markPreviewImageBroken(src);
+  }
+
+  function handlePreviewImageLoad(src: string) {
+    markPreviewImageLoaded(src);
+  }
 
   function updateImages(nextImages: string[]) {
     const nextImageSet = new Set(nextImages);
@@ -868,7 +951,7 @@ function BasicInfoPanel({
           </div>
         </div>
         <input
-          className={titleOverLimit ? "buyma-required-red" : ""}
+          className={titleInvalid ? "buyma-required-red" : ""}
           type="text"
           value={product?.title ?? ""}
           onChange={(event) => onChange({ title: event.target.value })}
@@ -879,25 +962,27 @@ function BasicInfoPanel({
             상품명 60자 초과: {titleOverLimit}자 초과
           </div>
         ) : null}
-
         <div className="buyma-form-grid col3">
           <Field label="브랜드명">
-            <input value={product?.brand ?? ""} onChange={(event) => onChange({ brand: event.target.value })} placeholder="Brand" />
+            <input
+              className={hasBrandName ? "" : "buyma-required-red"}
+              value={product?.brand ?? ""}
+              onChange={(event) => onChange({ brand: event.target.value })}
+              placeholder="Brand"
+            />
           </Field>
           <Field label="브랜드 ID">
-            <input value={product?.brandId ?? "0"} onChange={(event) => onChange({ brandId: event.target.value })} />
+            <input
+              className={hasBrandId ? "" : "buyma-required-red"}
+              value={product?.brandId ?? "0"}
+              onChange={(event) => onChange({ brandId: event.target.value })}
+            />
           </Field>
           <Field label="구입가격">
             <input
               type="number"
               value={product?.price || 0}
-              onChange={(event) => {
-                const price = Number(event.target.value) || 0;
-                onChange({
-                  price,
-                  sellingPrice: calculateSellingPrice(price, settings.marginRate, settings.exchangeRate),
-                });
-              }}
+              onChange={(event) => onChange({ price: Number(event.target.value) || 0 })}
             />
           </Field>
         </div>
@@ -934,7 +1019,11 @@ function BasicInfoPanel({
             <input value={product?.skuNumber ?? ""} onChange={(event) => onChange({ skuNumber: event.target.value })} placeholder="상품 수집 시 자동 생성" />
           </Field>
           <Field label="품번">
-            <input value={product?.modelNumber ?? product?.productCode ?? ""} onChange={(event) => onChange({ modelNumber: event.target.value })} />
+            <input
+              className={hasModelNumber ? "" : "buyma-required-red"}
+              value={getModelNumberInputValue(product)}
+              onChange={(event) => onChange({ modelNumber: event.target.value })}
+            />
           </Field>
         </div>
 
@@ -982,10 +1071,10 @@ function BasicInfoPanel({
         <div className="buyma-form-grid col3">
           <Field label="판매가격(円)">
             <input
-              className="buyma-required-red"
+              className={hasSellingPrice ? "" : "buyma-required-red"}
               type="number"
-              value={product && Object.hasOwn(product, "sellingPrice") ? product.sellingPrice ?? "" : calculatedPrice || 0}
-              onChange={(event) => onChange({ sellingPrice: event.target.value === "" ? undefined : Number(event.target.value) || 0 })}
+              value={product?.sellingPrice ?? 0}
+              onChange={(event) => onChange({ sellingPrice: Number(event.target.value) || 0 })}
             />
           </Field>
           <Field label={product?.unisex ? "카테고리 재선택" : "카테고리"}>
@@ -1021,6 +1110,7 @@ function BasicInfoPanel({
         <div className="buyma-description-supplement-grid">
           <Field label="상세내용">
             <textarea
+              className="buyma-description-textarea"
               rows={4}
               value={product?.description ?? ""}
               onChange={(event) => onChange({ description: event.target.value })}
@@ -1029,11 +1119,17 @@ function BasicInfoPanel({
           </Field>
           <Field label="色サイズ補足">
             <textarea
+              className={`buyma-supplement-textarea ${hasSizeSupplementMismatch ? "buyma-required-red" : ""}`}
               rows={4}
               value={product?.colorSizeSupplement ?? ""}
               onChange={(event) => onChange({ colorSizeSupplement: event.target.value })}
               placeholder="색상/사이즈 보충 내용을 입력"
             />
+            {hasSizeSupplementMismatch ? (
+              <div className="buyma-size-mismatch-warning">
+                {formatSizeSupplementMismatchMessage(sizeSupplementMismatch)}
+              </div>
+            ) : null}
           </Field>
         </div>
 
@@ -1052,6 +1148,9 @@ function BasicInfoPanel({
           images={images}
           selectedImageIndex={selectedImageIndex}
           selectedImage={selectedImage}
+          brokenImages={brokenImages}
+          onImageLoad={handlePreviewImageLoad}
+          onImageError={handlePreviewImageError}
           onSelect={setSelectedImageIndex}
           onDeleteSelected={deleteSelectedImage}
           onAdd={() => addImageInputRef.current?.click()}
@@ -1060,6 +1159,11 @@ function BasicInfoPanel({
           hasLogo={Boolean(product?.brandLogo || product?.brandLogos?.length)}
           disabled={!product}
         />
+        {hasBrokenImages ? (
+          <div className="buyma-image-warning">
+            이상한 이미지가 있습니다. 액박 이미지를 삭제하거나 교체해주세요.
+          </div>
+        ) : null}
         <input
           ref={addImageInputRef}
           type="file"
@@ -1096,6 +1200,9 @@ function ImageInlineManager({
   images,
   selectedImageIndex,
   selectedImage,
+  brokenImages,
+  onImageLoad,
+  onImageError,
   onSelect,
   onDeleteSelected,
   onAdd,
@@ -1107,6 +1214,9 @@ function ImageInlineManager({
   images: string[];
   selectedImageIndex: number;
   selectedImage: string;
+  brokenImages: Set<string>;
+  onImageLoad: (src: string) => void;
+  onImageError: (src: string) => void;
   onSelect: (index: number) => void;
   onDeleteSelected: () => void;
   onAdd: () => void;
@@ -1115,33 +1225,42 @@ function ImageInlineManager({
   hasLogo: boolean;
   disabled: boolean;
 }) {
+  const selectedImageBroken = selectedImage ? brokenImages.has(selectedImage) : false;
+
   return (
     <div className="buyma-inline-image-manager">
       <label>이미지 ({images.length})</label>
       <div className="buyma-image-manager-body">
-        <div className="buyma-image-list">
+        <div className={`buyma-image-list ${brokenImages.size ? "buyma-required-red" : ""}`}>
           {images.length ? (
             images.map((image, index) => (
               <button
                 key={`${image}-${index}`}
                 type="button"
-                className={index === selectedImageIndex ? "active" : ""}
+                className={`${index === selectedImageIndex ? "active" : ""} ${brokenImages.has(image) ? "broken" : ""}`}
                 onClick={() => onSelect(index)}
               >
                 {getImageListLabel(image, index)}
+                {brokenImages.has(image) ? " (이미지 오류)" : ""}
               </button>
             ))
           ) : (
             <div className="buyma-no-image">이미지 없음</div>
           )}
         </div>
-        <div className="buyma-image-preview">
+        <div className={`buyma-image-preview ${selectedImageBroken ? "buyma-required-red" : ""}`}>
           {selectedImage ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={selectedImage} alt="" />
+            <img
+              src={selectedImage}
+              alt=""
+              onLoad={() => onImageLoad(selectedImage)}
+              onError={() => onImageError(selectedImage)}
+            />
           ) : (
             <span className="buyma-no-image">이미지 없음</span>
           )}
+          {selectedImageBroken ? <span className="buyma-image-broken-label">이미지 오류</span> : null}
         </div>
       </div>
       <div className="buyma-image-manage-actions">
@@ -1252,6 +1371,10 @@ function ColorSizePanel({
   const rows = buildColorSizeRows(product);
   const [selectedRows, setSelectedRows] = useState<Set<number>>(() => new Set());
   const colorRows = getColorDetailRows(product, rows);
+  const sizeSupplementMismatch = getSizeSupplementMismatch(product);
+  const sizesMissingInSupplement = new Set(sizeSupplementMismatch.missingInSupplement);
+  const colorsMissingDetailSizes = new Set(sizeSupplementMismatch.missingInDetailByColor.map((item) => normalizeComparableColor(item.color)));
+  const hasSizeMismatch = hasSizeSupplementMismatchIssue(sizeSupplementMismatch);
 
   function updateRows(nextRows: ColorSizeRow[]) {
     const normalizedRows = nextRows
@@ -1373,6 +1496,7 @@ function ColorSizePanel({
                 <tr key={`color-detail-${index}`}>
                   <td>
                     <input
+                      className={colorsMissingDetailSizes.has(normalizeComparableColor(row.color)) ? "buyma-required-red" : ""}
                       value={row.color}
                       onChange={(event) => updateColorName(row.color, event.target.value)}
                     />
@@ -1426,7 +1550,13 @@ function ColorSizePanel({
                   </td>
                   <td><input value={row.color} onChange={(event) => updateRows(rows.map((item, rowIndex) => rowIndex === index ? { ...item, color: event.target.value, colorSystemId: getColorSystemId(event.target.value) || item.colorSystemId } : item))} /></td>
                   <td>{row.colorSystemId || "-"}</td>
-                  <td><input value={row.size} onChange={(event) => updateRows(rows.map((item, rowIndex) => rowIndex === index ? { ...item, size: event.target.value, sizeTypeId: resolveBuymaSizeTypeId(product?.category, event.target.value) } : item))} /></td>
+                  <td>
+                    <input
+                      className={sizesMissingInSupplement.has(normalizeComparableSize(row.size)) ? "buyma-required-red" : ""}
+                      value={row.size}
+                      onChange={(event) => updateRows(rows.map((item, rowIndex) => rowIndex === index ? { ...item, size: event.target.value, sizeTypeId: resolveBuymaSizeTypeId(product?.category, event.target.value) } : item))}
+                    />
+                  </td>
                   <td className={row.stock === "0" ? "buyma-stock-soldout" : undefined}>
                     <select value={row.stock} onChange={(event) => updateRows(rows.map((item, rowIndex) => rowIndex === index ? { ...item, stock: event.target.value as StockStatus } : item))}>
                       <option value="1">구매가능</option>
@@ -1449,6 +1579,11 @@ function ColorSizePanel({
             </tbody>
           </table>
         </div>
+        {hasSizeMismatch ? (
+          <div className="buyma-size-mismatch-warning">
+            {formatSizeSupplementMismatchMessage(sizeSupplementMismatch)}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -1492,6 +1627,9 @@ function ImageEditorPanel({
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragTargetRef = useRef<EditorDragTarget | null>(null);
+  const editorImageCacheRef = useRef(new Map<string, Promise<HTMLImageElement | null>>());
+  const editorRenderIdRef = useRef(0);
+  const placedImageIdRef = useRef(0);
   const [template, setTemplate] = useState<EditorTemplate>("basic");
   const [bgColor, setBgColor] = useState("#ffffff");
   const [transparentBg, setTransparentBg] = useState(false);
@@ -1516,6 +1654,8 @@ function ImageEditorPanel({
     const brandText = getEnglishBrandName(product);
     const brandLogo = getProductBrandLogo(product);
     let ignore = false;
+    editorImageCacheRef.current.clear();
+    editorRenderIdRef.current += 1;
 
     void Promise.resolve().then(() => {
       if (ignore) return;
@@ -1534,62 +1674,92 @@ function ImageEditorPanel({
     };
   }, [product]);
 
+  async function renderEditorCanvas({ showSelection = true }: { showSelection?: boolean } = {}) {
+    const canvas = canvasRef.current;
+    if (!canvas) return false;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return false;
+
+    const renderId = editorRenderIdRef.current + 1;
+    editorRenderIdRef.current = renderId;
+    const logo = showLogo ? await loadEditorCanvasImage(logoImage) : null;
+    const placedLoaded = await Promise.all(placedImages.map(async (placed) => ({
+      placed,
+      image: await loadEditorCanvasImage(placed.src),
+    })));
+    if (showText) await loadEditorFont(textSize);
+    if (renderId !== editorRenderIdRef.current) return false;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    try {
+      ctx.scale(EDITOR_CANVAS_SCALE, EDITOR_CANVAS_SCALE);
+      if (!transparentBg) {
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(0, 0, EDITOR_DESIGN_SIZE, EDITOR_DESIGN_SIZE);
+      }
+
+      if (template === "lucky") {
+        renderLuckyTemplate(ctx);
+      } else if (template === "lucky2") {
+        renderLucky2Template(ctx);
+      } else if (template === "northface") {
+        renderNorthFaceTemplate(ctx);
+      } else if (template === "northfaceWhiteLabel") {
+        renderNorthFaceWhiteLabelTemplate(ctx);
+      }
+
+      placedLoaded.forEach(({ placed, image }) => {
+        if (image) {
+          const clipRect = placed.clipToLuckyRightCell ? getLuckyRightCellClipRect(template) : null;
+          if (clipRect) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(clipRect.x, clipRect.y, clipRect.width, clipRect.height);
+            ctx.clip();
+          }
+
+          drawImageFitWithBackgroundRemoval(
+            ctx,
+            image,
+            placed.x,
+            placed.y,
+            placed.width,
+            placed.height,
+            placed.removeBackground,
+          );
+          if (clipRect) ctx.restore();
+          if (showSelection && placedImages[selectedPlacedIndex]?.id === placed.id) {
+            drawPlacedImageSelection(ctx, placed);
+          }
+        }
+      });
+
+      if (logo) drawImageFit(ctx, logo, logoX, logoY, logoWidth, logoHeight);
+
+      if (showText) {
+        drawEditorText(ctx, titleText, textX, textY, textSize, textColor);
+      }
+    } finally {
+      ctx.restore();
+    }
+
+    return true;
+  }
+
+  function loadEditorCanvasImage(src: string) {
+    if (!src) return Promise.resolve(null);
+    const cached = editorImageCacheRef.current.get(src);
+    if (cached) return cached;
+
+    const promise = loadCanvasImage(src);
+    editorImageCacheRef.current.set(src, promise);
+    return promise;
+  }
+
   useEffect(() => {
     void renderEditorCanvas();
   });
-
-  async function renderEditorCanvas({ showSelection = true }: { showSelection?: boolean } = {}) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!transparentBg) {
-      ctx.fillStyle = bgColor;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-
-    const logo = showLogo ? await loadCanvasImage(logoImage) : null;
-    const placedLoaded = await Promise.all(placedImages.map(async (placed) => ({
-      placed,
-      image: await loadCanvasImage(placed.src),
-    })));
-
-    if (template === "lucky") {
-      renderLuckyTemplate(ctx);
-    } else if (template === "lucky2") {
-      renderLucky2Template(ctx);
-    } else if (template === "northface") {
-      renderNorthFaceTemplate(ctx);
-    } else if (template === "northfaceWhiteLabel") {
-      renderNorthFaceWhiteLabelTemplate(ctx);
-    }
-
-    placedLoaded.forEach(({ placed, image }) => {
-      if (image) {
-        drawImageFitWithBackgroundRemoval(
-          ctx,
-          image,
-          placed.x,
-          placed.y,
-          placed.width,
-          placed.height,
-          placed.removeBackground,
-        );
-        if (showSelection && placedImages[selectedPlacedIndex]?.id === placed.id) {
-          drawPlacedImageSelection(ctx, placed);
-        }
-      }
-    });
-
-    if (logo) drawImageFit(ctx, logo, logoX, logoY, logoWidth, logoHeight);
-
-    if (showText) {
-      await loadEditorFont(textSize);
-      drawEditorText(ctx, titleText, textX, textY, textSize, textColor);
-    }
-  }
 
   const availablePlacedSources = useMemo(
     () => uniqueTextList([
@@ -1602,14 +1772,14 @@ function ImageEditorPanel({
   );
   const selectedPlacedImage = placedImages[selectedPlacedIndex] ?? null;
 
-  function addPlacedImage(src: string) {
+  async function addPlacedImage(src: string) {
+    const image = await loadEditorCanvasImage(src);
+    const frame = getInitialPlacedImageFrame(image);
+    placedImageIdRef.current += 1;
     const nextImage: EditorPlacedImage = {
-      id: `${Date.now()}-${placedImages.length}`,
+      id: `placed-${placedImageIdRef.current}`,
       src,
-      x: 80,
-      y: 80,
-      width: 260,
-      height: 260,
+      ...frame,
       removeBackground: transparentImportedImageBg,
     };
     setPlacedImages((current) => [...current, nextImage]);
@@ -1661,6 +1831,14 @@ function ImageEditorPanel({
     );
   }
 
+  function updateSelectedPlacedImageClipToLuckyRightCell(clipToLuckyRightCell: boolean) {
+    setPlacedImages((current) =>
+      current.map((image, index) =>
+        index === selectedPlacedIndex ? { ...image, clipToLuckyRightCell } : image,
+      ),
+    );
+  }
+
   function removePlacedImage() {
     setPlacedImages((current) => current.filter((_, index) => index !== selectedPlacedIndex));
     setSelectedPlacedIndex((current) => Math.max(0, current - 1));
@@ -1677,10 +1855,10 @@ function ImageEditorPanel({
     setShowText(true);
     setLogoWidth(170);
     setLogoHeight(70);
-    setLogoX((800 - 170) / 2);
+    setLogoX((EDITOR_DESIGN_SIZE - 170) / 2);
     setLogoY(34);
     setTextSize(34);
-    setTextX(400 - estimateTextWidth(titleText || getEnglishBrandName(product), 34) / 2);
+    setTextX(EDITOR_DESIGN_SIZE / 2 - estimateTextWidth(titleText || getEnglishBrandName(product), 34) / 2);
     setTextY(130);
   }
 
@@ -1695,8 +1873,8 @@ function ImageEditorPanel({
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
+    const scaleX = EDITOR_DESIGN_SIZE / rect.width;
+    const scaleY = EDITOR_DESIGN_SIZE / rect.height;
     return {
       x: (event.clientX - rect.left) * scaleX,
       y: (event.clientY - rect.top) * scaleY,
@@ -1791,7 +1969,8 @@ function ImageEditorPanel({
     const canvas = canvasRef.current;
     if (!canvas) return;
     try {
-      await renderEditorCanvas({ showSelection: false });
+      const rendered = await renderEditorCanvas({ showSelection: false });
+      if (!rendered) return;
       onSave(transparentBg ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", 0.9));
       void renderEditorCanvas();
     } catch {
@@ -1804,7 +1983,8 @@ function ImageEditorPanel({
     const canvas = canvasRef.current;
     if (!canvas) return;
     try {
-      await renderEditorCanvas({ showSelection: false });
+      const rendered = await renderEditorCanvas({ showSelection: false });
+      if (!rendered) return;
       const dataUrl = transparentBg ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", 0.95);
       triggerDownload(dataUrlToBlob(dataUrl), `buyma_main_image.${getDataUrlExtension(dataUrl)}`);
       void renderEditorCanvas();
@@ -1820,8 +2000,8 @@ function ImageEditorPanel({
         <canvas
           ref={canvasRef}
           className="buyma-editor-canvas"
-          width={800}
-          height={800}
+          width={EDITOR_CANVAS_SIZE}
+          height={EDITOR_CANVAS_SIZE}
           onPointerDown={startCanvasDrag}
           onPointerMove={moveCanvasDrag}
           onPointerUp={stopCanvasDrag}
@@ -1917,7 +2097,7 @@ function ImageEditorPanel({
                 key={`${image}-${index}`}
                 type="button"
                 className="buyma-editor-source-thumb"
-                onClick={() => addPlacedImage(image)}
+                onClick={() => void addPlacedImage(image)}
                 title="캔버스에 배치"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -1980,6 +2160,13 @@ function ImageEditorPanel({
                   checked={selectedPlacedImage.removeBackground}
                   onChange={(event) => updateSelectedPlacedImageBackground(event.target.checked)}
                 /> 선택 이미지 흰배경 투명
+              </label>
+              <label className="buyma-chk buyma-editor-full-row">
+                <input
+                  type="checkbox"
+                  checked={Boolean(selectedPlacedImage.clipToLuckyRightCell)}
+                  onChange={(event) => updateSelectedPlacedImageClipToLuckyRightCell(event.target.checked)}
+                /> 럭키 오른쪽칸 안으로 자르기
               </label>
               <button className="buyma-editor-tpl-btn" onClick={removePlacedImage}>선택 삭제</button>
             </div>
@@ -2045,7 +2232,11 @@ function SettingsPanel({
   }
 
   async function testImageServer() {
-    if (!settings.imgbbApiKey || !settings.imageServerUrl || !settings.imageServerApiKey) {
+    const imgbbApiKey = cleanText(settings.imgbbApiKey);
+    const imageServerUrl = cleanText(settings.imageServerUrl);
+    const imageServerApiKey = cleanText(settings.imageServerApiKey);
+
+    if (!imgbbApiKey || !imageServerUrl || !imageServerApiKey) {
       updateImageServerStatus("imgBB API Key, Worker URL, Worker API Key를 입력하세요.");
       return;
     }
@@ -2053,7 +2244,7 @@ function SettingsPanel({
     setIsTestingImageServer(true);
     updateImageServerStatus("이미지 서버 연결 테스트 중...");
     try {
-      const workerUrl = settings.imageServerUrl.replace(/\/$/, "");
+      const workerUrl = imageServerUrl.replace(/\/$/, "");
       const health = await fetch(`${workerUrl}/health`);
       if (!health.ok) throw new Error(`Worker HTTP ${health.status}`);
 
@@ -2061,19 +2252,19 @@ function SettingsPanel({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-API-Key": settings.imageServerApiKey,
+          "X-API-Key": imageServerApiKey,
         },
         body: JSON.stringify({
           sku: "connection_test",
           images: [],
-          imgbbApiKey: settings.imgbbApiKey,
+          imgbbApiKey,
         }),
       });
       if (!authCheck.ok) throw new Error(`Worker API Key 확인 실패: HTTP ${authCheck.status}`);
 
       const imgbbUrl = await uploadBase64ToImgbb(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
-        settings.imgbbApiKey,
+        imgbbApiKey,
         "buyma_connection_test",
       );
       if (!imgbbUrl) throw new Error("imgBB API Key 확인 실패");
@@ -2660,6 +2851,16 @@ async function uploadAllProductImages(
   );
 }
 
+function hasProductEditedImage(product: ProductDraft) {
+  return Boolean(cleanText(product.editedImage));
+}
+
+function findMissingEditedImageUploadIndex(products: ProductDraft[]) {
+  return products.findIndex((product) =>
+    hasProductEditedImage(product) && !cleanText(product.uploadedImageUrls?.[0]),
+  );
+}
+
 async function uploadProductImages(
   product: ProductDraft,
   productIndex: number,
@@ -2743,18 +2944,39 @@ async function mapWithConcurrency<T, R>(
 }
 
 async function uploadBase64ToImgbb(base64Data: string, apiKey: string, imageName: string) {
+  const normalizedApiKey = cleanText(apiKey);
+  if (!normalizedApiKey) throw new Error("imgBB API Key가 비어 있습니다.");
+
   const formData = new FormData();
   formData.append("image", base64Data.includes(",") ? base64Data.split(",").pop() || "" : base64Data);
   formData.append("name", imageName);
 
-  const response = await fetch(`https://api.imgbb.com/1/upload?key=${encodeURIComponent(apiKey)}`, {
+  const response = await fetch(`https://api.imgbb.com/1/upload?key=${encodeURIComponent(normalizedApiKey)}`, {
     method: "POST",
     body: formData,
   });
 
-  if (!response.ok) return "";
-  const data = (await response.json()) as { success?: boolean; data?: { display_url?: string; url?: string } };
-  return data.success ? data.data?.display_url || data.data?.url || "" : "";
+  const data = (await response.json().catch(() => null)) as {
+    success?: boolean;
+    data?: { display_url?: string; url?: string };
+    error?: { message?: string; code?: number };
+  } | null;
+  if (!response.ok || !data?.success) {
+    throw new Error(`imgBB 업로드 실패: ${formatImgBbError(data, response.status)}`);
+  }
+
+  const uploadedUrl = data.data?.display_url || data.data?.url || "";
+  if (!uploadedUrl) throw new Error("imgBB 업로드 실패: 응답에 이미지 URL이 없습니다.");
+  return uploadedUrl;
+}
+
+function formatImgBbError(
+  data: { error?: { message?: string; code?: number } } | null,
+  status: number,
+) {
+  const message = cleanText(data?.error?.message);
+  const code = data?.error?.code;
+  return message ? `${message}${code ? ` (${code})` : ""}` : `HTTP ${status}`;
 }
 
 async function ensureEnglishProductTitle(product: ProductDraft, prefix = ""): Promise<ProductDraft> {
@@ -2783,13 +3005,13 @@ function formatCollectedTitleWithBrand(product: ProductDraft, title: string, pre
   const brand = resolveProductTitleBrand(product, sourceTitle);
   const cleanedTitle = removeProductTitleNoise(sourceTitle);
   const rawProductName =
-    stripTitlePrefix(stripTrailingColorCount(stripBrandFromTitle(cleanedTitle, brand)), titlePrefix) ||
+    stripTitlePrefix(stripBrandFromTitle(cleanedTitle, brand), titlePrefix) ||
     stripTitlePrefix(cleanedTitle, titlePrefix) ||
     "Fashion Item";
   const productName =
     product.site === "thenorthfacekorea.co.kr" ? appendProductCodeToTitle(rawProductName, product.productCode) : rawProductName;
 
-  return joinTitleParts(brand ? `[${brand}]` : "", titlePrefix, productName);
+  return joinTitleParts(brand ? `[${brand}]` : "", titlePrefix, appendColorCountToTitle(productName, product));
 }
 
 async function ensureJapaneseProductDescription(
@@ -3176,21 +3398,225 @@ function sanitizeCsvCell(value: unknown, preserveNewlines = false) {
   return text;
 }
 
-function findProductMissingCategoryOrSeason(products: ProductDraft[]) {
+async function findProductCollectionValidationIssue(products: ProductDraft[]) {
   for (let index = 0; index < products.length; index += 1) {
     const product = products[index];
     const fields: string[] = [];
     const category = cleanText(product.category);
     const season = cleanText(product.season);
+    const titleOverLimit = countBuymaTitleCharacters(product.title) > BUYMA_TITLE_MAX_LENGTH;
+    const sizeSupplementMismatch = getSizeSupplementMismatch(product);
 
+    if (!isRequiredText(product.title)) {
+      fields.push("상품명");
+    }
+    if (!isValidSellingPrice(product.sellingPrice)) {
+      fields.push("판매가격");
+    }
+    if (!isRequiredText(product.brand)) {
+      fields.push("브랜드명");
+    }
+    if (!isValidBuymaBrandId(product.brandId)) {
+      fields.push("브랜드 ID");
+    }
+    if (!isRequiredText(getModelNumberInputValue(product))) {
+      fields.push("품번");
+    }
     if (!isValidBuymaCategory(category)) {
       fields.push("카테고리");
+    }
+    if (titleOverLimit) {
+      fields.push("상품명 60자 초과");
+    }
+    if (await hasBrokenProductImage(product.images)) {
+      fields.push("이상한 이미지");
+    }
+    if (hasSizeSupplementMismatchIssue(sizeSupplementMismatch)) {
+      fields.push("사이즈상세/色サイズ補足 사이즈 불일치");
     }
     if (!isValidBuymaSeason(season)) fields.push("시즌");
     if (fields.length) return { index, fields };
   }
 
   return null;
+}
+
+async function hasBrokenProductImage(images: string[] | undefined) {
+  const results = await Promise.all((images ?? []).filter(Boolean).map(checkImageLoadable));
+  return results.some((isLoadable) => !isLoadable);
+}
+
+function checkImageLoadable(src: string) {
+  return new Promise<boolean>((resolve) => {
+    if (!src) {
+      resolve(false);
+      return;
+    }
+    const image = new Image();
+    let settled = false;
+    const finish = (isLoadable: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      resolve(isLoadable);
+    };
+    const timeout = window.setTimeout(() => finish(false), 6000);
+    image.onload = () => finish(true);
+    image.onerror = () => finish(false);
+    image.src = src;
+  });
+}
+
+function isValidSellingPrice(value: unknown) {
+  const price = Number(value);
+  return Number.isFinite(price) && price > 0;
+}
+
+function isRequiredText(value: unknown) {
+  return Boolean(cleanText(value));
+}
+
+function isValidBuymaBrandId(value: unknown) {
+  const text = cleanText(value);
+  return Boolean(text) && text !== "0";
+}
+
+function getModelNumberInputValue(product: ProductDraft | null | undefined) {
+  return product?.modelNumber ?? product?.productCode ?? "";
+}
+
+function getSizeSupplementMismatch(product: ProductDraft | null | undefined): SizeSupplementMismatch {
+  if (!product) return { missingInSupplement: [], missingInDetail: [], missingInDetailByColor: [] };
+
+  const detailRows = buildColorSizeRows(product);
+  const detailSizes = getUniqueComparableSizes(detailRows.map((row) => row.size));
+  const supplementSizes = extractColorSizeSupplementSizes(product.colorSizeSupplement);
+
+  if (!detailSizes.length && !supplementSizes.length) {
+    return { missingInSupplement: [], missingInDetail: [], missingInDetailByColor: [] };
+  }
+
+  if (!supplementSizes.length && isSingleOneSizeDetail(detailSizes)) {
+    return { missingInSupplement: [], missingInDetail: [], missingInDetailByColor: [] };
+  }
+
+  const detailSet = new Set(detailSizes);
+  const supplementSet = new Set(supplementSizes);
+  const detailGroups = getSizeDetailGroupsByColor(detailRows);
+  const missingInDetailByColor = detailGroups.length > 1 ? detailGroups
+    .filter((group) => group.sizes.length > 0)
+    .map((group) => ({
+      color: group.color,
+      sizes: supplementSizes.filter((size) => !group.sizes.includes(size)),
+    }))
+    .filter((group) => group.sizes.length > 0) : [];
+
+  return {
+    missingInSupplement: detailSizes.filter((size) => !supplementSet.has(size)),
+    missingInDetail: supplementSizes.filter((size) => !detailSet.has(size)),
+    missingInDetailByColor,
+  };
+}
+
+function hasSizeSupplementMismatchIssue(mismatch: SizeSupplementMismatch) {
+  return mismatch.missingInSupplement.length > 0 ||
+    mismatch.missingInDetail.length > 0 ||
+    mismatch.missingInDetailByColor.length > 0;
+}
+
+function formatSizeSupplementMismatchMessage(mismatch: SizeSupplementMismatch) {
+  const messages: string[] = [];
+  if (mismatch.missingInSupplement.length) {
+    messages.push(`色サイズ補足에 없는 사이즈: ${mismatch.missingInSupplement.join(", ")}`);
+  }
+  if (mismatch.missingInDetail.length) {
+    messages.push(`사이즈상세에 없는 사이즈: ${mismatch.missingInDetail.join(", ")}`);
+  }
+  mismatch.missingInDetailByColor.forEach((item) => {
+    messages.push(`${item.color}에 없는 사이즈: ${item.sizes.join(", ")}`);
+  });
+  return messages.join(" / ");
+}
+
+function getSizeDetailGroupsByColor(rows: ColorSizeRow[]) {
+  const groups = new Map<string, { color: string; sizes: string[] }>();
+
+  rows.forEach((row) => {
+    const color = cleanText(row.color) || "FREE";
+    const colorKey = normalizeComparableColor(color);
+    const size = normalizeComparableSize(row.size);
+    if (!colorKey || !isComparableProductSize(size)) return;
+
+    const group = groups.get(colorKey) ?? { color, sizes: [] };
+    if (!group.sizes.includes(size)) group.sizes.push(size);
+    groups.set(colorKey, group);
+  });
+
+  return [...groups.values()];
+}
+
+function normalizeComparableColor(value: unknown) {
+  return cleanText(value).toUpperCase();
+}
+
+function getUniqueComparableSizes(values: Array<unknown>) {
+  return uniqueTextList(values.map(normalizeComparableSize).filter(Boolean));
+}
+
+function extractColorSizeSupplementSizes(value: unknown) {
+  const lines = String(value ?? "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => cleanText(line))
+    .filter(Boolean);
+  const sizes: string[] = [];
+
+  lines.forEach((line) => {
+    const explicitSize = line.match(/^(.+?)\s+SIZE$/i)?.[1];
+    if (explicitSize) {
+      sizes.push(explicitSize);
+      return;
+    }
+
+    const labeledSize = line.match(/^([A-Z0-9./+-]{1,16})\s*[-:]\s*(?=.*\d)/i)?.[1];
+    if (labeledSize) {
+      sizes.push(labeledSize);
+      return;
+    }
+
+    const tabularSize = line.match(/^([A-Z0-9./+-]{1,16})\s+(?:-?\d+(?:\.\d+)?\s*(?:CM|MM)?\s*){2,}$/i)?.[1];
+    if (tabularSize) sizes.push(tabularSize);
+  });
+
+  return getUniqueComparableSizes(sizes).filter(isComparableProductSize);
+}
+
+function normalizeComparableSize(value: unknown) {
+  const text = cleanText(value)
+    .replace(/[()[\]{}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\s+SIZE$/i, "")
+    .trim()
+    .toUpperCase();
+
+  if (!text) return "";
+  if (/^(FREE SIZE|ONE SIZE|ONESIZE|OS|O\/S)$/.test(text)) return "FREE";
+  return text;
+}
+
+function isComparableProductSize(value: string) {
+  const size = normalizeComparableSize(value);
+  if (!size) return false;
+  if (/^(SIZE|GUIDE|SIZE GUIDE|LENGTH|TOTAL|CHEST|BUST|WAIST|HIP|HEM|SHOULDER|SLEEVE|ARM|CROTCH|RISE|BOTTOM|THIGH|WIDTH|HEIGHT|COLOR|COLOUR|MODEL)$/.test(size)) {
+    return false;
+  }
+  if (/^\d+(?:\.\d+)?(?:CM|MM)?$/.test(size)) return /^\d{2,3}$/.test(size);
+  return /^(FREE|XS|S|M|L|XL|XXL|XXXL|[2-9]XL|[A-Z]{1,4}\d{0,3}|\d{1,3})$/.test(size);
+}
+
+function isSingleOneSizeDetail(detailSizes: string[]) {
+  return detailSizes.length === 1 && detailSizes[0] === "FREE";
 }
 
 function isValidBuymaCategory(category: unknown) {
@@ -3520,13 +3946,13 @@ function buildCollectedProductTitle(product: ProductDraft, prefix: string) {
   const bracketedBrand = brand ? `[${brand}]` : "";
   const cleanedTitle = removeProductTitleNoise(sourceTitle);
   const rawProductName =
-    stripTitlePrefix(stripTrailingColorCount(stripBrandFromTitle(cleanedTitle, brand)), titlePrefix) ||
+    stripTitlePrefix(stripBrandFromTitle(cleanedTitle, brand), titlePrefix) ||
     stripTitlePrefix(cleanedTitle, titlePrefix) ||
     "Fashion Item";
   const productName =
     product.site === "thenorthfacekorea.co.kr" ? appendProductCodeToTitle(rawProductName, product.productCode) : rawProductName;
 
-  return joinTitleParts(bracketedBrand, titlePrefix, productName);
+  return joinTitleParts(bracketedBrand, titlePrefix, appendColorCountToTitle(productName, product));
 }
 
 function appendProductCodeToTitle(title: string, productCode: unknown) {
@@ -3557,6 +3983,24 @@ function isNoiseColorOption(value: string) {
   return /^(W|M|F|WOMEN|WOMAN|MEN|MAN|여성|남성|공용|UNISEX)$/i.test(cleanText(value));
 }
 
+function appendColorCountToTitle(title: string, product: ProductDraft) {
+  const colorCount = getProductTitleColorCount(product);
+  if (colorCount <= 1 || /\(\d+\s*colors?\)\s*$/i.test(title)) return title;
+  return `${title} (${colorCount}colors)`;
+}
+
+function getProductTitleColorCount(product: ProductDraft) {
+  const colorCandidates = [
+    ...(product.colors ?? []),
+    ...(product.sizeTableData?.map((row) => row.color) ?? []),
+  ].flatMap((color) => splitListInput(color));
+  const usefulColors = uniqueTextList(colorCandidates.map(convertColorToEnglish)).filter(
+    (color) => color && color !== "FREE" && color !== "ONE SIZE" && !isNoiseColorOption(color),
+  );
+
+  return usefulColors.length;
+}
+
 function stripBrandFromTitle(title: string, brand: string) {
   if (!title) return title;
   if (!brand) {
@@ -3579,10 +4023,6 @@ function removeProductTitleNoise(title: string) {
     .replace(/\bSizes?\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function stripTrailingColorCount(title: string) {
-  return title.replace(/\s*\(\d+\s*colors?\)\s*$/i, "").trim();
 }
 
 function stripTitlePrefix(title: string, prefix: string) {
@@ -3922,6 +4362,28 @@ function isRemoteImageSrc(src: string) {
   return /^https?:\/\//i.test(src);
 }
 
+function getInitialPlacedImageFrame(image: HTMLImageElement | null) {
+  if (!image?.width || !image?.height) {
+    return {
+      x: 80,
+      y: 80,
+      width: 260,
+      height: 260,
+    };
+  }
+
+  const ratio = Math.min(EDITOR_INITIAL_IMAGE_MAX_SIZE / image.width, EDITOR_INITIAL_IMAGE_MAX_SIZE / image.height);
+  const width = Math.round(image.width * ratio);
+  const height = Math.round(image.height * ratio);
+
+  return {
+    x: Math.round((EDITOR_DESIGN_SIZE - width) / 2),
+    y: Math.round((EDITOR_DESIGN_SIZE - height) / 2),
+    width,
+    height,
+  };
+}
+
 function drawImageFit(
   ctx: CanvasRenderingContext2D,
   image: HTMLImageElement,
@@ -3956,17 +4418,14 @@ function drawImageCover(
 }
 
 function renderLuckyTemplate(ctx: CanvasRenderingContext2D) {
-  const headerHeight = 112;
-  const leftWidth = 330;
-
   ctx.strokeStyle = "#111";
   ctx.lineWidth = 2;
   ctx.strokeRect(1, 1, 798, 798);
   ctx.beginPath();
-  ctx.moveTo(0, headerHeight);
-  ctx.lineTo(800, headerHeight);
-  ctx.moveTo(leftWidth, headerHeight);
-  ctx.lineTo(leftWidth, 800);
+  ctx.moveTo(0, EDITOR_LUCKY_HEADER_HEIGHT);
+  ctx.lineTo(800, EDITOR_LUCKY_HEADER_HEIGHT);
+  ctx.moveTo(EDITOR_LUCKY_LEFT_WIDTH, EDITOR_LUCKY_HEADER_HEIGHT);
+  ctx.lineTo(EDITOR_LUCKY_LEFT_WIDTH, 800);
   ctx.stroke();
 }
 
@@ -3991,20 +4450,29 @@ function renderNorthFaceWhiteLabelTemplate(ctx: CanvasRenderingContext2D) {
 }
 
 function renderNorthFaceBaseTemplate(ctx: CanvasRenderingContext2D, headerColor: string) {
-  const headerHeight = 112;
-  const leftWidth = 330;
-
   ctx.fillStyle = headerColor;
-  ctx.fillRect(0, 0, 800, headerHeight);
+  ctx.fillRect(0, 0, 800, EDITOR_LUCKY_HEADER_HEIGHT);
   ctx.strokeStyle = "#111";
   ctx.lineWidth = 2;
   ctx.strokeRect(1, 1, 798, 798);
   ctx.beginPath();
-  ctx.moveTo(0, headerHeight);
-  ctx.lineTo(800, headerHeight);
-  ctx.moveTo(leftWidth, headerHeight);
-  ctx.lineTo(leftWidth, 800);
+  ctx.moveTo(0, EDITOR_LUCKY_HEADER_HEIGHT);
+  ctx.lineTo(800, EDITOR_LUCKY_HEADER_HEIGHT);
+  ctx.moveTo(EDITOR_LUCKY_LEFT_WIDTH, EDITOR_LUCKY_HEADER_HEIGHT);
+  ctx.lineTo(EDITOR_LUCKY_LEFT_WIDTH, 800);
   ctx.stroke();
+}
+
+function getLuckyRightCellClipRect(template: EditorTemplate) {
+  if (template !== "lucky" && template !== "northface" && template !== "northfaceWhiteLabel") return null;
+
+  const inset = 2;
+  return {
+    x: EDITOR_LUCKY_LEFT_WIDTH + inset,
+    y: EDITOR_LUCKY_HEADER_HEIGHT + inset,
+    width: EDITOR_DESIGN_SIZE - EDITOR_LUCKY_LEFT_WIDTH - inset * 2,
+    height: EDITOR_DESIGN_SIZE - EDITOR_LUCKY_HEADER_HEIGHT - inset * 2,
+  };
 }
 
 function drawImageFitWithBackgroundRemoval(

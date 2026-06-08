@@ -10,6 +10,7 @@ type SizeGuideData = {
   description: string;
 };
 type SaturMeasurementContext = "top" | "bottom" | "skirt" | "onepiece" | "unknown";
+type SaturMeasurementMapping = { key?: string; label: string; multiplier?: number };
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36";
@@ -43,7 +44,6 @@ async function extractSaturProduct(url: URL): Promise<ProductDraft> {
   const descriptionKo = joinDescriptionBlocks(
     normalizeTextBlock(jsonLd?.description),
     extractFabricLine(extractSaturTabBlock(html, 2)),
-    sizeGuide.description,
   );
 
   if (!title && images.length === 0) {
@@ -67,6 +67,7 @@ async function extractSaturProduct(url: URL): Promise<ProductDraft> {
     productCode: productNo,
     descriptionKo,
     description: "",
+    colorSizeSupplement: sizeGuide.description,
     stockStatus,
     optionStockMap,
     ...(Object.keys(sizeGuide.measurements).length ? { sizeMeasurements: sizeGuide.measurements } : {}),
@@ -260,30 +261,46 @@ function parseSizeGuide(sizeGuideHtml: string, title: string): SizeGuideData {
   const descriptionLines: string[] = [];
   const text = normalizeTextBlock(sizeGuideHtml);
 
-  text.split("\n").forEach((line) => {
-    const match = line.match(/^([A-Z0-9]+)\s*-\s*(.+)$/i);
-    if (!match) return;
-
-    const size = cleanSizeName(match[1]);
+  parseSaturSizeGuideRows(text).forEach(({ size: rawSize, detail }) => {
+    const size = cleanSizeName(rawSize);
     if (!isLikelySizeName(size)) return;
 
     const row: Record<string, string> = {};
-    const rawDescriptionParts = match[2].split("/").map(cleanText).filter(Boolean);
-    const context = resolveMeasurementContext(`${title} ${match[2]}`);
-    match[2].split("/").forEach((part) => {
+    const descriptionParts: string[] = [];
+    const context = resolveMeasurementContext(`${title} ${detail}`);
+    detail.split("/").forEach((part) => {
       const measurement = parseMeasurementPart(part, context);
       if (!measurement) return;
-      row[measurement.key] = measurement.value;
+      descriptionParts.push(`${measurement.label} ${measurement.displayValue}`);
+      if (measurement.key && measurement.value) row[measurement.key] = measurement.value;
     });
 
     if (Object.keys(row).length) measurements[size] = row;
-    if (rawDescriptionParts.length) descriptionLines.push(`${size} - ${rawDescriptionParts.join(" / ")}`);
+    if (descriptionParts.length) descriptionLines.push(`${size} - ${descriptionParts.join(" / ")}`);
   });
 
   return {
     measurements,
-    description: descriptionLines.length ? ["사이즈 상세", ...descriptionLines].join("\n") : "",
+    description: descriptionLines.length ? ["Size Guide", ...descriptionLines].join("\n") : "",
   };
+}
+
+function parseSaturSizeGuideRows(text: string) {
+  const sizePattern = "(?:FREE|OS|O\\/S|XS|S|M|L|XL|XXL|XXXL|[2-9]XL|\\d{2,3})";
+  const rowPattern = new RegExp(`(?:^|\\s)(${sizePattern})\\s*-\\s*([\\s\\S]*?)(?=(?:\\s)${sizePattern}\\s*-|$)`, "gi");
+
+  return Array.from(text.matchAll(rowPattern))
+    .map((match) => ({
+      size: match[1],
+      detail: cleanSaturSizeGuideDetail(match[2]),
+    }))
+    .filter((row) => row.detail);
+}
+
+function cleanSaturSizeGuideDetail(value: string) {
+  return cleanText(value)
+    .replace(/사이즈\s*단위는[\s\S]*$/i, "")
+    .trim();
 }
 
 function resolveMeasurementContext(value: string): SaturMeasurementContext {
@@ -296,50 +313,65 @@ function resolveMeasurementContext(value: string): SaturMeasurementContext {
 }
 
 function parseMeasurementPart(value: string, context: SaturMeasurementContext) {
-  const match = cleanText(value).match(/^(.+?)\s*(-?\d+(?:\.\d+)?)\s*(?:cm)?$/i);
+  const match = cleanText(value).match(/^(.+?)\s*(-?\d+(?:\.\d+)?(?:\s*[~-]\s*-?\d+(?:\.\d+)?)?)\s*(?:cm)?$/i);
   if (!match) return null;
 
   const mapping = resolveSaturMeasurementKey(match[1], context);
   if (!mapping) return null;
+  const rawValue = match[2];
 
   return {
     key: mapping.key,
     label: mapping.label,
-    value: formatMeasurementValue(match[2], mapping.multiplier),
+    displayValue: formatMeasurementDisplayValue(rawValue),
+    value: isSingleMeasurementValue(rawValue) ? formatMeasurementValue(rawValue, mapping.multiplier) : "",
   };
 }
 
 function resolveSaturMeasurementKey(
   value: string,
   context: SaturMeasurementContext,
-): { key: string; label: string; multiplier?: number } | null {
+): SaturMeasurementMapping | null {
   const label = cleanText(value).replace(/\s+/g, "");
-  if (["스커트장", "스커트길이", "스커트丈", "치마기장", "치마길이"].includes(label)) return { key: "スカート丈", label: "스커트丈" };
-  if (["총장", "총기장", "총길이", "기장"].includes(label) && context === "skirt") return { key: "スカート丈", label: "스커트丈" };
-  if (["총장", "총기장", "총길이", "기장"].includes(label) && context !== "bottom") return { key: "着丈", label: "총장" };
-  if (["너비", "가로", "폭가로"].includes(label)) return { key: "幅", label: "너비" };
-  if (["높이", "세로"].includes(label)) return { key: "高さ", label: "높이" };
-  if (["폭", "깊이", "마치"].includes(label)) return { key: "マチ", label: "폭" };
-  if (["핸들", "핸들높이", "손잡이", "손잡이높이"].includes(label)) return { key: "持ち手", label: "핸들 높이" };
-  if (["볼너비", "발볼", "발볼너비"].includes(label)) return { key: "足幅", label: "볼 너비" };
-  if (["굽높이", "굽", "힐높이"].includes(label)) return { key: "ヒール高", label: "굽 높이" };
-  if (["어깨", "어깨너비", "어깨넓이", "어깨단면"].includes(label)) return { key: "肩幅", label: "어깨" };
+  if (["스커트장", "스커트길이", "스커트丈", "치마기장", "치마길이"].includes(label)) return { key: "スカート丈", label: "Skirt Length" };
+  if (["총장", "총기장", "총길이", "기장"].includes(label) && context === "skirt") return { key: "スカート丈", label: "Skirt Length" };
+  if (["총장", "총기장", "총길이", "기장"].includes(label) && context !== "bottom") return { key: "着丈", label: "Length" };
+  if (["너비", "가로", "폭가로"].includes(label)) return { key: "幅", label: "Width" };
+  if (["높이", "세로"].includes(label)) return { key: "高さ", label: "Height" };
+  if (["폭", "깊이", "마치"].includes(label)) return { key: "マチ", label: "Depth" };
+  if (["핸들", "핸들높이", "손잡이", "손잡이높이"].includes(label)) return { key: "持ち手", label: "Handle" };
+  if (["스트랩", "스트랩길이", "끈", "끈길이"].includes(label)) return { key: "ストラップ", label: "Strap Length" };
+  if (["스트랩너비", "끈너비"].includes(label)) return { label: "Strap Width" };
+  if (["볼너비", "발볼", "발볼너비"].includes(label)) return { key: "足幅", label: "Foot Width" };
+  if (["굽높이", "굽", "힐높이"].includes(label)) return { key: "ヒール高", label: "Heel Height" };
+  if (["어깨", "어깨너비", "어깨넓이", "어깨단면"].includes(label)) return { key: "肩幅", label: "Shoulder" };
   if (["가슴", "가슴단면", "가슴너비", "가슴폭", "품", "품단면"].includes(label)) {
-    return { key: "胸囲", label: "가슴둘레", multiplier: 2 };
+    return { key: "胸囲", label: "Chest", multiplier: 2 };
   }
-  if (["가슴둘레"].includes(label)) return { key: "胸囲", label: "가슴둘레" };
-  if (["소매", "소매장", "소매길이", "팔길이"].includes(label)) return { key: "袖丈", label: "소매장" };
-  if (["허리", "허리단면", "허리너비", "허리폭"].includes(label)) return { key: "ウエスト", label: "허리둘레" };
-  if (["허리둘레"].includes(label)) return { key: "ウエスト", label: "허리둘레" };
-  if (["엉덩이", "힙", "힙단면", "엉덩이단면", "엉덩이너비", "엉덩이폭"].includes(label)) return { key: "ヒップ", label: "엉덩이둘레" };
-  if (["엉덩이둘레", "힙둘레"].includes(label)) return { key: "ヒップ", label: "엉덩이둘레" };
-  if (["밑위", "앞밑위"].includes(label)) return { key: "股上", label: "밑위" };
-  if (["밑아래", "밑아래길이", "인심"].includes(label)) return { key: "股下", label: "밑아래" };
-  if (["허벅지", "허벅지단면", "허벅지너비", "허벅지폭"].includes(label)) return { key: "もも周り", label: "허벅지둘레" };
-  if (["허벅지둘레"].includes(label)) return { key: "もも周り", label: "허벅지둘레" };
-  if (["밑단", "밑단단면", "밑단너비", "밑단폭"].includes(label) && context !== "top") return { key: "すそ周り", label: "밑단둘레" };
-  if (["밑단둘레"].includes(label)) return { key: "すそ周り", label: "밑단둘레" };
+  if (["가슴둘레"].includes(label)) return { key: "胸囲", label: "Chest" };
+  if (["소매", "소매장", "소매길이", "팔길이"].includes(label)) return { key: "袖丈", label: "Sleeve Length" };
+  if (["암홀", "암홀단면"].includes(label)) return { label: "Armhole" };
+  if (["허리", "허리단면", "허리너비", "허리폭"].includes(label)) return { key: "ウエスト", label: "Waist" };
+  if (["허리둘레"].includes(label)) return { key: "ウエスト", label: "Waist" };
+  if (["엉덩이", "힙", "힙단면", "엉덩이단면", "엉덩이너비", "엉덩이폭"].includes(label)) return { key: "ヒップ", label: "Hips" };
+  if (["엉덩이둘레", "힙둘레"].includes(label)) return { key: "ヒップ", label: "Hips" };
+  if (["밑위", "앞밑위"].includes(label)) return { key: "股上", label: "Rise" };
+  if (["밑아래", "밑아래길이", "인심"].includes(label)) return { key: "股下", label: "Inseam" };
+  if (["허벅지", "허벅지단면", "허벅지너비", "허벅지폭"].includes(label)) return { key: "もも周り", label: "Thigh" };
+  if (["허벅지둘레"].includes(label)) return { key: "もも周り", label: "Thigh" };
+  if (["밑단", "밑단단면", "밑단너비", "밑단폭"].includes(label)) return { key: "すそ周り", label: "Hem" };
+  if (["밑단둘레"].includes(label)) return { key: "すそ周り", label: "Hem" };
   return null;
+}
+
+function isSingleMeasurementValue(value: string) {
+  return /^-?\d+(?:\.\d+)?$/.test(cleanText(value));
+}
+
+function formatMeasurementDisplayValue(value: string) {
+  const text = cleanText(value).replace(/\s*~\s*/g, "~").replace(/\s*-\s*/g, "-");
+  if (!text || /cm$/i.test(text)) return text;
+  return `${text}cm`;
 }
 
 function formatMeasurementValue(value: string, multiplier = 1) {

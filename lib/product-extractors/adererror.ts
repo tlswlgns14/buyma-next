@@ -44,7 +44,8 @@ async function extractAdererrorProduct(url: URL): Promise<ProductDraft> {
   const sizeMeasurements = parseSizeGuideMeasurements(sizeGuide);
   const price = parsePrice(kr.SALES_PRICE || kr.PRICE || data.sales_price || data.price);
   const images = unique(colorProducts.flatMap((product) => extractImages(product.data))).slice(0, 20);
-  const descriptionKo = buildDescription(data, kr, sizeGuide);
+  const descriptionKo = buildDescription(data, kr);
+  const colorSizeSupplement = buildEnglishSizeGuideDescription(sizeGuide);
   const productCode = cleanText(data.product_idx) || productId;
   const modelNumber = cleanText(data.product_code);
 
@@ -70,6 +71,7 @@ async function extractAdererrorProduct(url: URL): Promise<ProductDraft> {
     modelNumber,
     descriptionKo,
     description: "",
+    colorSizeSupplement,
     stockStatus: resolveOverallStockStatus(optionStockMap, cleanText(data.stock_status)),
     optionStockMap,
     ...(Object.keys(sizeMeasurements).length ? { sizeMeasurements } : {}),
@@ -281,42 +283,57 @@ function resolveImageUrl(value: string) {
   return `${ADER_CDN}/${src}`;
 }
 
-function buildDescription(data: AderProductData, kr: AderTranslation, sizeGuide: AderSizeGuide) {
+function buildDescription(data: AderProductData, kr: AderTranslation) {
   return joinBlocks(
-    buildSizeGuideDescription(sizeGuide),
     buildLabeledBlock("소재 정보", normalizeTextBlock(kr.MATERIAL)),
     buildLabeledBlock("제품 정보", joinBlocks(cleanText(data.product_code), normalizeTextBlock(kr.DETAIL))),
     buildLabeledBlock("취급안내", joinBlocks(normalizeTextBlock(kr.CARE), normalizeTextBlock(kr.OLD_CARE))),
   );
 }
 
-function buildSizeGuideDescription(sizeGuide: AderSizeGuide) {
+function buildEnglishSizeGuideDescription(sizeGuide: AderSizeGuide) {
   const dimensions = asRecord(sizeGuide.dimensions);
-  const optionSizeText = normalizeTextBlock(sizeGuide.option_size_txt);
   if (!dimensions) {
-    return buildLabeledBlock(
-      "사이즈 가이드",
-      joinBlocks(normalizeTextBlock(sizeGuide.size_guide_top), optionSizeText),
-    );
+    return buildEnglishOptionSizeText(sizeGuide.option_size_txt);
   }
 
-  const lines = [normalizeTextBlock(sizeGuide.size_guide_top), "사이즈 가이드"].filter(Boolean);
-  if (optionSizeText) lines.push(optionSizeText);
+  const lines = ["Size Guide"];
   Object.entries(dimensions).forEach(([size, rawItems]) => {
     const items = asArray(rawItems).map(asRecord).filter(isRecord);
     if (!items.length) return;
 
-    lines.push(`${cleanSizeName(size)} SIZE`);
+    const sizeLines: string[] = [];
     items.forEach((item) => {
-      const title = cleanText(item.title);
+      const title = getEnglishMeasurementLabel(cleanText(item.title));
       const value = formatMeasurementWithUnit(item.value);
-      if (title && value) lines.push(`${title} ${value}`);
+      if (title && value) sizeLines.push(`${title} ${value}`);
     });
+    if (!sizeLines.length) return;
+
+    lines.push(`${cleanSizeName(size)} SIZE`, ...sizeLines);
   });
 
-  const bottom = normalizeTextBlock(sizeGuide.size_guide_bottom);
-  if (bottom) lines.push(bottom);
-  return lines.join("\n");
+  return lines.length > 1 ? lines.join("\n") : "";
+}
+
+function buildEnglishOptionSizeText(value: unknown) {
+  const lines = normalizeTextBlock(value).split("\n").map(cleanText).filter(Boolean);
+  if (lines.length < 2) return "";
+
+  const size = cleanSizeName(lines[0]);
+  if (!isLikelySizeName(size)) return "";
+
+  const supplementLines = ["Size Guide", `${size} SIZE`];
+  lines.slice(1).forEach((line) => {
+    const match = line.match(/^(.+?)\s*(-?\d+(?:\.\d+)?)\s*(?:cm|mm)?$/i);
+    if (!match) return;
+
+    const title = getEnglishMeasurementLabel(match[1]);
+    const value = formatMeasurementWithUnit(match[2]);
+    if (title && value) supplementLines.push(`${title} ${value}`);
+  });
+
+  return supplementLines.length > 2 ? supplementLines.join("\n") : "";
 }
 
 function parseSizeGuideMeasurements(sizeGuide: AderSizeGuide) {
@@ -389,6 +406,33 @@ function normalizeMeasurementKey(value: string): { key: string; multiplier?: num
   if (["밑단", "밑단단면", "밑단너비", "밑단폭", "hem", "hemwidth", "bottomwidth", "legopening"].includes(key)) return { key: "hemwidth" };
   if (["스커트장", "스커트길이", "스커트丈", "skirtlength"].includes(key)) return { key: "length" };
   return null;
+}
+
+function getEnglishMeasurementLabel(value: string) {
+  const mapping = normalizeMeasurementKey(value);
+  if (!mapping) {
+    const label = cleanText(value);
+    return /[가-힣]/.test(label) ? "" : label;
+  }
+
+  const labels: Record<string, string> = {
+    "幅": "Width",
+    "高さ": "Height",
+    "マチ": "Depth",
+    "持ち手": "Handle",
+    length: "Length",
+    chest: "Chest",
+    shoulder: "Shoulder",
+    sleevelength: "Sleeve Length",
+    waist: "Waist",
+    hips: "Hips",
+    rise: "Rise",
+    inseam: "Inseam",
+    thighwidth: "Thigh Width",
+    hemwidth: "Hem Width",
+  };
+
+  return labels[mapping.key] || cleanText(value);
 }
 
 function formatMeasurementValue(value: unknown, multiplier = 1) {

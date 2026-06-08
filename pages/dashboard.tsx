@@ -125,10 +125,14 @@ const sourcingSites = [
 export default function Dashboard() {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
-  const [activeMenu, setActiveMenu] =
-    useState<DashboardMenuKey>(DEFAULT_DASHBOARD_MENU);
   const { authUser, loading, signOut, user } = useAuth();
   const router = useRouter();
+  const queryMenu = Array.isArray(router.query.menu)
+    ? router.query.menu[0]
+    : router.query.menu;
+  const activeMenu = isDashboardMenuKey(queryMenu)
+    ? queryMenu
+    : DEFAULT_DASHBOARD_MENU;
   const displayName = getDisplayName(user?.username, authUser?.user_metadata);
   const weekRange = getCurrentWeekRange();
   const canUseCompetitorPrices = Boolean(user?.can_use_competitor_prices);
@@ -155,18 +159,6 @@ export default function Dashboard() {
     }
   }, [authUser, loading, router]);
 
-  useEffect(() => {
-    if (!router.isReady) return;
-
-    const queryMenu = Array.isArray(router.query.menu)
-      ? router.query.menu[0]
-      : router.query.menu;
-
-    if (isDashboardMenuKey(queryMenu)) {
-      setActiveMenu(queryMenu);
-    }
-  }, [router.isReady, router.query.menu]);
-
   async function handleSignOut() {
     setSigningOut(true);
 
@@ -179,7 +171,6 @@ export default function Dashboard() {
   }
 
   function handleMenuClick(menuKey: DashboardMenuKey) {
-    setActiveMenu(menuKey);
     void router.replace(
       {
         pathname: router.pathname,
