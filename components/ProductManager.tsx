@@ -90,7 +90,10 @@ type SizeSupplementMismatch = {
   missingInDetailByColor: Array<{ color: string; sizes: string[] }>;
 };
 
-const IMAGE_UPLOAD_CONCURRENCY = 5;
+const IMAGE_UPLOAD_CONCURRENCY = 4;
+const IMAGE_UPLOAD_BATCH_SIZE = 5;
+const IMAGE_UPLOAD_RETRY_COUNT = 2;
+const IMAGE_UPLOAD_RETRY_DELAY_MS = 1500;
 const BUYMA_TITLE_MAX_LENGTH = 60;
 
 const BUYMA_CATEGORY_LABEL_OVERRIDES: Record<string, string> = {
@@ -712,7 +715,7 @@ export default function ProductManager() {
               if (!activeProduct) return;
               updateActiveProduct({
                 editedImage,
-                images: putEditedImageFirst(activeProduct, editedImage),
+                images: removeEditedImageFromImages(activeProduct.images, activeProduct.editedImage, editedImage),
                 uploadedImageUrls: undefined,
               });
               setStatus("편집 이미지를 상품에 저장했습니다.");
@@ -2600,18 +2603,17 @@ function FileInput({ onLoad }: { onLoad: (dataUrl: string) => void }) {
   );
 }
 
-function putEditedImageFirst(product: ProductDraft, editedImage: string) {
-  const previousEditedImage = product.editedImage;
-  const remainingImages = product.images.filter(
-    (image) => image && image !== editedImage && image !== previousEditedImage,
-  );
-  return [editedImage, ...remainingImages];
+function removeEditedImageFromImages(images: string[], previousEditedImage?: string, nextEditedImage?: string) {
+  const editedImages = new Set([previousEditedImage, nextEditedImage].map((image) => cleanText(image)).filter(Boolean));
+  if (!editedImages.size) return images.filter(Boolean);
+  return images.filter((image) => image && !editedImages.has(cleanText(image)));
 }
 
 function filterRemovedImages(images: string[], removedImageUrls: string[] | undefined, editedImage?: string) {
   const removed = new Set((removedImageUrls ?? []).map((image) => cleanText(image)).filter(Boolean));
-  if (!removed.size) return images;
-  return images.filter((image) => image === editedImage || !removed.has(cleanText(image)));
+  const sourceImages = removeEditedImageFromImages(images, editedImage);
+  if (!removed.size) return sourceImages;
+  return sourceImages.filter((image) => !removed.has(cleanText(image)));
 }
 
 function TabButton({
@@ -2893,27 +2895,77 @@ async function uploadProductImages(
     .filter((image) => !uploadedImageUrls[image.index - 1]);
 
   if (pendingSourceImages.length > 0) {
-    const response = await fetch(`${settings.imageServerUrl.replace(/\/$/, "")}/upload-batch`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": settings.imageServerApiKey,
-      },
-      body: JSON.stringify({
-        sku: product.skuNumber || product.productCode || `product_${productIndex + 1}`,
+    const sku = product.skuNumber || product.productCode || `product_${productIndex + 1}`;
+    const imageBatches = chunkList(pendingSourceImages, IMAGE_UPLOAD_BATCH_SIZE);
+
+    for (const images of imageBatches) {
+      const response = await fetchImageUploadBatch(settings, {
+        sku,
         imgbbApiKey: settings.imgbbApiKey,
-        images: pendingSourceImages,
-      }),
-    });
+        images,
+      });
 
     if (!response.ok) throw new Error(`이미지 Worker 오류: HTTP ${response.status}`);
-    const data = (await response.json()) as { results?: Array<{ index: number; url?: string }> };
-    data.results?.forEach((item) => {
-      if (item.url) uploadedImageUrls[item.index - 1] = item.url;
-    });
+      const data = (await response.json()) as { results?: Array<{ index: number; url?: string }> };
+      data.results?.forEach((item) => {
+        if (item.url) uploadedImageUrls[item.index - 1] = item.url;
+      });
+    }
   }
 
   return { ...product, uploadedImageUrls };
+}
+
+async function fetchImageUploadBatch(
+  settings: BuymaSettings,
+  body: {
+    sku: string;
+    imgbbApiKey: string;
+    images: Array<{ url: string; index: number }>;
+  },
+) {
+  const url = `${settings.imageServerUrl.replace(/\/$/, "")}/upload-batch`;
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= IMAGE_UPLOAD_RETRY_COUNT; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": settings.imageServerApiKey,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (response.ok || !isRetryableImageUploadStatus(response.status) || attempt === IMAGE_UPLOAD_RETRY_COUNT) {
+        return response;
+      }
+    } catch (error) {
+      lastError = error;
+      if (attempt === IMAGE_UPLOAD_RETRY_COUNT) throw error;
+    }
+
+    await wait(IMAGE_UPLOAD_RETRY_DELAY_MS * (attempt + 1));
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("?대?吏 Worker ?붿껌???ㅽ뙣?덉뒿?덈떎.");
+}
+
+function isRetryableImageUploadStatus(status: number) {
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function chunkList<T>(items: T[], chunkSize: number) {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
 }
 
 function getRequiredUploadedImageIndexes(product: ProductDraft, sourceImages: string[]) {
@@ -3182,31 +3234,42 @@ function mergeCurrentProductsIntoCsvProducts(
   currentCsvRowIndexes: number[],
   appendCurrentProducts = false,
 ) {
+  const storedCsvProducts = csvProducts.map((product) => product ? removeEditedImageFromProductImages(product) : product);
+  const productsToMerge = currentProducts.map(removeEditedImageFromProductImages);
+
   if (appendCurrentProducts) {
-    return [...csvProducts, ...currentProducts];
+    return [...storedCsvProducts, ...productsToMerge];
   }
 
-  if (currentCsvRowIndexes.length > currentProducts.length) {
-    const replaceIndexes = currentCsvRowIndexes.slice(0, currentProducts.length);
-    const removeIndexes = new Set(currentCsvRowIndexes.slice(currentProducts.length));
-    const merged = [...csvProducts];
+  if (currentCsvRowIndexes.length > productsToMerge.length) {
+    const replaceIndexes = currentCsvRowIndexes.slice(0, productsToMerge.length);
+    const removeIndexes = new Set(currentCsvRowIndexes.slice(productsToMerge.length));
+    const merged = [...storedCsvProducts];
 
-    currentProducts.forEach((product, index) => {
+    productsToMerge.forEach((product, index) => {
       merged[replaceIndexes[index]] = product;
     });
 
     return merged.filter((_, index) => !removeIndexes.has(index));
   }
 
-  if (currentCsvRowIndexes.length === currentProducts.length) {
-    const merged = [...csvProducts];
-    currentProducts.forEach((product, index) => {
+  if (currentCsvRowIndexes.length === productsToMerge.length) {
+    const merged = [...storedCsvProducts];
+    productsToMerge.forEach((product, index) => {
       merged[currentCsvRowIndexes[index]] = product;
     });
     return merged;
   }
 
-  return [...csvProducts, ...currentProducts];
+  return [...storedCsvProducts, ...productsToMerge];
+}
+
+function removeEditedImageFromProductImages(product: ProductDraft) {
+  const images = removeEditedImageFromImages(product.images, product.editedImage);
+  if (images.length === product.images.length && images.every((image, index) => image === product.images[index])) {
+    return product;
+  }
+  return { ...product, images };
 }
 
 function getCurrentCsvRowIndexesAfterMerge(
@@ -3406,6 +3469,7 @@ async function findProductCollectionValidationIssue(products: ProductDraft[]) {
     const season = cleanText(product.season);
     const titleOverLimit = countBuymaTitleCharacters(product.title) > BUYMA_TITLE_MAX_LENGTH;
     const sizeSupplementMismatch = getSizeSupplementMismatch(product);
+    const brandConsistencyIssues = getBrandConsistencyIssues(product);
 
     if (!isRequiredText(product.title)) {
       fields.push("상품명");
@@ -3434,11 +3498,62 @@ async function findProductCollectionValidationIssue(products: ProductDraft[]) {
     if (hasSizeSupplementMismatchIssue(sizeSupplementMismatch)) {
       fields.push("사이즈상세/色サイズ補足 사이즈 불일치");
     }
+    fields.push(...brandConsistencyIssues);
     if (!isValidBuymaSeason(season)) fields.push("시즌");
     if (fields.length) return { index, fields };
   }
 
   return null;
+}
+
+function getBrandConsistencyIssues(product: ProductDraft) {
+  const issues: string[] = [];
+  const brandText = cleanText(product.brand || product.brandDisplayName);
+  const brandId = cleanText(product.brandId);
+  const titleBrand = cleanText(extractBracketBrand(product.title));
+
+  if (brandText && brandId && brandId !== "0") {
+    const brandById = BUYMA_BRAND_OPTIONS.find((brand) => brand.id === brandId);
+    if (!brandById || !doesBrandTextMatchOption(brandText, brandById)) {
+      issues.push("브랜드명과 브랜드 ID 불일치");
+    }
+  }
+
+  if (titleBrand && brandText && !areSameBrandReference(titleBrand, brandText)) {
+    issues.push("상품명 [브랜드]와 브랜드명 불일치");
+  }
+
+  return issues;
+}
+
+function doesBrandTextMatchOption(value: string, brand: BuymaBrandOption) {
+  const resolved = findBuymaBrand(value);
+  if (resolved) return resolved.id === brand.id;
+
+  const normalized = normalizeBrandComparisonText(value);
+  return [brand.name, brand.nameJp, brand.displayName].some(
+    (candidate) => normalizeBrandComparisonText(candidate) === normalized,
+  );
+}
+
+function areSameBrandReference(left: string, right: string) {
+  const leftBrand = findBuymaBrand(left);
+  const rightBrand = findBuymaBrand(right);
+  if (leftBrand && rightBrand) return leftBrand.id === rightBrand.id;
+
+  const normalizedLeft = normalizeBrandComparisonText(left);
+  const normalizedRight = normalizeBrandComparisonText(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
+function normalizeBrandComparisonText(value: string) {
+  return cleanText(value)
+    .normalize("NFKC")
+    .replace(/[()[\]{}]/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
 }
 
 async function hasBrokenProductImage(images: string[] | undefined) {
@@ -3823,10 +3938,6 @@ function mergeRefetchedProduct(
     if (!dirtyFields.colorSizeSupplement) {
       merged.colorSizeSupplement = mergeColorSizeSupplement(merged.colorSizeSupplement, separated.colorSizeSupplement);
     }
-  }
-
-  if (merged.editedImage) {
-    merged.images = putEditedImageFirst(merged, merged.editedImage);
   }
 
   merged.images = filterRemovedImages(merged.images, merged.removedImageUrls, merged.editedImage);
